@@ -1,0 +1,45 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Copy the web app into the Android app
+        run: |
+          mkdir -p android/app/src/main/assets
+          cp index.html android/app/src/main/assets/index.html
+
+      - name: Build APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk PlaninaAPP.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: PlaninaAPP ${{ github.run_number }}
+          body: Namestitvena datoteka PlaninaAPP.apk za Android.
+          files: PlaninaAPP.apk
+          make_latest: true

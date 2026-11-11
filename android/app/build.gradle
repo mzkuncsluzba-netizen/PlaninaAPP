@@ -1,0 +1,30 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'si.planina.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'si.planina.app'
+        minSdk 26
+        targetSdk 34
+        versionCode (System.getenv('GITHUB_RUN_NUMBER') ?: '1') as int
+        versionName "1.${System.getenv('GITHUB_RUN_NUMBER') ?: '0'}"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+}

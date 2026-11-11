@@ -305,6 +305,7 @@ ${body}
 `;
 }
 async function saveFile(filename,text){
+  if(window.PlaninaAndroid){window.PlaninaAndroid.saveFile(filename,text);return}
   const file=new File([text],filename,{type:'application/gpx+xml'});
   if(matchMedia('(pointer:coarse)').matches&&navigator.canShare&&navigator.canShare({files:[file]})){
     try{await navigator.share({files:[file],title:filename});return}catch(e){if(e.name==='AbortError')return}

@@ -22,4 +22,4 @@ Ker vsebuje kodo pod licenco GPLv3, je celotna PlaninaAPP objavljena pod GNU GPL
 
 Ostalo:
 - ocena časa hoje po normi DIN 33466,
-- ikona po vzoru Knafelčeve markacije.
+- ikona: razgledni stolp na Planini nad Vrhniko, narisan za PlaninaAPP.

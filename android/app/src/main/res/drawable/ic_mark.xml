@@ -1,10 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Knafelc trail marking: red ring with a white centre -->
+<!-- Lookout tower on Planina nad Vrhniko (drawn for PlaninaAPP) -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <path android:fillColor="#C8102E"
-        android:pathData="M54,26a28,28 0,1 0,0.01 0z" />
-    <path android:fillColor="#FFFFFF"
-        android:pathData="M54,40a14,14 0,1 0,0.01 0z" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="1.6" android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M41.00,88.00L65.81,80.00 M67.00,88.00L42.19,80.00 M42.19,80.00L64.62,72.00 M65.81,80.00L43.38,72.00 M43.38,72.00L63.50,64.50 M64.62,72.00L44.50,64.50 M44.50,64.50L62.38,57.00 M63.50,64.50L45.62,57.00 M45.62,57.00L61.19,49.00 M62.38,57.00L46.81,49.00 M46.81,49.00L60.00,41.00 M61.19,49.00L48.00,41.00 M42.19,80.00L65.81,80.00 M43.38,72.00L64.62,72.00 M44.50,64.50L63.50,64.50 M45.62,57.00L62.38,57.00 M46.81,49.00L61.19,49.00 M42.00,41.00L42.00,34.00 M66.00,41.00L66.00,34.00 M42.00,34.00L66.00,34.00 M42.00,37.50L66.00,37.50 M54.00,41.00L54.00,34.00 M47.50,34.00L47.50,28.50 M60.50,34.00L60.50,28.50" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="2.6" android:strokeLineCap="round"
+        android:pathData="M41.00,88.00L48.00,41.00 M67.00,88.00L60.00,41.00 M34,88.5L74,88.5" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="3" android:strokeLineCap="round"
+        android:pathData="M42.00,41.00L66.00,41.00" />
+    <path android:fillColor="#FFFFFF" android:strokeColor="#FFFFFF" android:strokeWidth="1.2" android:strokeLineJoin="round"
+        android:pathData="M44.5,29L54,22L63.5,29Z" />
 </vector>

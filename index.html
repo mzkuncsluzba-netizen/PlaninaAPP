@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="sl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>PlaninaAPP</title>
+<meta name="theme-color" content="#c8102e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="PlaninaAPP">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23c8102e'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap">
+<style>
+/* Layout: one-screen app. Topo map fills the screen, a bottom panel holds the live figures and the record controls. */
+:root{
+  --bg:#eef1ee; --surface:#ffffff; --fg:#18201b; --muted:#5a675e; --line:#d5dcd6;
+  --accent:#c8102e; --accent-fg:#ffffff; --track:#1d5ea8; --ok:#23784a; --warn:#b86a00;
+  --display:"Barlow Condensed","Arial Narrow",system-ui,sans-serif;
+  --body:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#101411; --surface:#191f1b; --fg:#e7ece8; --muted:#97a59b; --line:#2b342e;
+  --accent:#ff4a5c; --accent-fg:#16070a; --track:#6fadff; --ok:#57c08a; --warn:#f0a43a; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#101411; --surface:#191f1b; --fg:#e7ece8; --muted:#97a59b; --line:#2b342e;
+  --accent:#ff4a5c; --accent-fg:#16070a; --track:#6fadff; --ok:#57c08a; --warn:#f0a43a; color-scheme:dark}
+
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:15px/1.4 var(--body);display:flex;flex-direction:column;overflow:hidden;-webkit-tap-highlight-color:transparent}
+button,input{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--track);outline-offset:2px}
+
+.bar{display:flex;align-items:center;gap:10px;background:var(--surface);border-bottom:1px solid var(--line);
+  padding:calc(8px + env(safe-area-inset-top,0px)) max(16px,env(safe-area-inset-right,0px)) 8px max(16px,env(safe-area-inset-left,0px))}
+.mark{width:26px;height:26px;border-radius:50%;background:var(--accent);display:grid;place-items:center;flex:none}
+.mark::after{content:"";width:12px;height:12px;border-radius:50%;background:#fff}
+.bar h1{font:700 24px/1 var(--display);letter-spacing:.01em;margin:0;flex:1}
+.bar h1 span{color:var(--accent)}
+.tbtn{border:1px solid var(--line);background:transparent;border-radius:999px;padding:6px 14px;font-weight:600;font-size:14px}
+
+#mapWrap{position:relative;flex:1;min-height:140px}
+#map{position:absolute;inset:0;background:var(--line)}
+#mapMsg{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;color:var(--muted)}
+.fab{position:absolute;right:max(12px,env(safe-area-inset-right,0px));bottom:12px;z-index:500;width:46px;height:46px;border-radius:50%;
+  border:1px solid var(--line);background:var(--surface);display:grid;place-items:center;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+.fab svg{width:22px;height:22px;stroke:var(--fg);fill:none;stroke-width:2}
+.fab.on svg{stroke:var(--track)}
+
+.panel{background:var(--surface);border-top:1px solid var(--line);max-height:58%;overflow:auto;display:flex;flex-direction:column;gap:10px;
+  padding-block:12px calc(12px + env(safe-area-inset-bottom,0px));
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.routeLine{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:13px;color:var(--muted)}
+.routeLine b{color:var(--fg);font:600 17px/1.1 var(--display);letter-spacing:.01em;min-width:0;overflow-wrap:anywhere}
+.alert{border-radius:10px;padding:8px 12px;font-weight:600;background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 40%,transparent)}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px 6px}
+.stat{min-width:0}
+.stat .l{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat .v{font:600 26px/1.05 var(--display);font-variant-numeric:tabular-nums;white-space:nowrap}
+.stat .v small{font-size:15px;font-weight:500;color:var(--muted);margin-left:2px}
+.stat .v.ok{color:var(--ok)} .stat .v.bad{color:var(--warn)}
+.divider{height:1px;background:var(--line)}
+#profile{width:100%;height:70px;display:block}
+.actions{display:flex;gap:8px}
+.actions button{flex:1;border-radius:12px;padding:13px 10px;font-weight:600;font-size:16px;border:1px solid var(--line);background:transparent}
+.actions .primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+.hint{font-size:12px;color:var(--muted);margin:0}
+
+dialog{border:none;border-radius:16px;padding:0;background:var(--surface);color:var(--fg);width:min(520px,calc(100% - 24px));max-height:calc(100% - 40px)}
+dialog::backdrop{background:rgba(10,14,11,.5)}
+.dlg{display:flex;flex-direction:column;gap:14px;padding:18px 18px 20px}
+.dlg h2{font:700 24px/1.1 var(--display);margin:0;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.dlg h3{font:600 17px/1.2 var(--display);letter-spacing:.02em;text-transform:uppercase;margin:0;color:var(--muted)}
+.dlg section{display:flex;flex-direction:column;gap:8px}
+.x{border:none;background:transparent;font-size:26px;line-height:1;padding:0 4px;color:var(--muted)}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.btn{border:1px solid var(--line);background:transparent;border-radius:10px;padding:10px 14px;font-weight:600}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+.btn.danger{color:var(--accent)}
+.btn.danger.armed{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+.file{display:block;border:1.5px dashed var(--line);border-radius:12px;padding:16px;text-align:center;font-weight:600}
+.file input{display:none}
+.num{width:72px;border:1px solid var(--line);border-radius:10px;padding:9px 10px;background:var(--bg);font-variant-numeric:tabular-nums}
+.txt{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--bg)}
+.muted{color:var(--muted);font-size:13px;margin:0}
+.list{display:flex;flex-direction:column;gap:0;margin:0;padding:0;list-style:none}
+.list li{display:flex;flex-direction:column;gap:6px;padding:12px 0;border-top:1px solid var(--line)}
+.list .t{font-weight:600;overflow-wrap:anywhere}
+.list .m{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+.list .row .btn{padding:7px 11px;font-size:13px}
+
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(24px + env(safe-area-inset-bottom,0px));z-index:9999;background:var(--fg);color:var(--bg);
+  padding:10px 16px;border-radius:999px;font-weight:600;font-size:14px;max-width:calc(100% - 32px);text-align:center}
+.leaflet-container{font:12px var(--body)}
+@media (max-width:360px){.stat .v{font-size:22px}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <div class="mark" aria-hidden="true"></div>
+  <h1>Planina<span>APP</span></h1>
+  <button class="tbtn" id="openRoute">Trasa</button>
+  <button class="tbtn" id="openTracks">Posnetki</button>
+</header>
+
+<div id="mapWrap">
+  <div id="map"></div>
+  <div id="mapMsg" hidden>Zemljevid se ni naložil. Preveri povezavo. Snemanje in štetje časa delujeta tudi brez njega.</div>
+  <button class="fab" id="locate" aria-label="Pokaži moj položaj">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+  </button>
+</div>
+
+<section class="panel">
+  <div class="routeLine" id="routeLine" hidden></div>
+  <div class="alert" id="offRoute" hidden></div>
+
+  <div class="stats">
+    <div class="stat"><div class="l">Čas</div><div class="v" id="vTime">0:00:00</div></div>
+    <div class="stat"><div class="l">Razdalja</div><div class="v" id="vDist">0,00<small>km</small></div></div>
+    <div class="stat"><div class="l">Vzpon</div><div class="v" id="vUp">0<small>m</small></div></div>
+    <div class="stat"><div class="l">Povprečno</div><div class="v" id="vSpeed">–<small>km/h</small></div></div>
+  </div>
+
+  <div id="routeStats" hidden>
+    <div class="divider" style="margin-bottom:10px"></div>
+    <div class="stats">
+      <div class="stat"><div class="l">Do cilja</div><div class="v" id="vRemain">–<small>km</small></div></div>
+      <div class="stat"><div class="l">Še hoje</div><div class="v" id="vEta">–</div></div>
+      <div class="stat"><div class="l">Prihod</div><div class="v" id="vArrive">–</div></div>
+      <div class="stat"><div class="l">Načrt</div><div class="v" id="vPlan">–</div></div>
+    </div>
+    <canvas id="profile" style="margin-top:10px" aria-label="Višinski profil trase"></canvas>
+  </div>
+
+  <div class="actions">
+    <button class="primary" id="btnStart">Začni</button>
+    <button id="btnPause" hidden>Pavza</button>
+    <button id="btnFinish" hidden>Končaj</button>
+  </div>
+  <p class="hint" id="hint">Naloži traso pod »Trasa« ali takoj začni snemati svojo pot.</p>
+</section>
+
+<!-- Trasa -->
+<dialog id="dlgRoute"><div class="dlg">
+  <h2>Trasa <button class="x" data-close aria-label="Zapri">×</button></h2>
+  <label class="file" for="gpxIn">Naloži datoteko .gpx<input type="file" id="gpxIn" accept=".gpx,application/gpx+xml,application/xml,text/xml"></label>
+  <section id="routeInfo" hidden>
+    <p class="muted" id="routeInfoTxt"></p>
+    <div class="row"><button class="btn danger" id="clearRoute">Odstrani traso</button></div>
+  </section>
+  <section>
+    <h3>Ciljni čas</h3>
+    <p class="muted">Med hojo vidiš, ali si pred načrtom ali za njim. Pusti prazno, če ga ne potrebuješ.</p>
+    <div class="row">
+      <input class="num" id="tH" type="number" min="0" max="99" inputmode="numeric" placeholder="ur"> h
+      <input class="num" id="tM" type="number" min="0" max="59" inputmode="numeric" placeholder="min"> min
+      <button class="btn" id="saveTarget">Shrani</button>
+      <button class="btn" id="useDin" hidden>Uporabi oceno DIN</button>
+    </div>
+  </section>
+  <section id="ambitSec" hidden>
+    <h3>Za uro Suunto Ambit</h3>
+    <p class="muted">Ambit sprejme največ 100 točk za vse trase skupaj. Tu traso poenostaviš in odstraniš ločene točke (waypointe), nato jo uvoziš v aplikacijo Suunto.</p>
+    <div class="row">
+      Največ <input class="num" id="ambitN" type="number" min="10" max="100" value="90" inputmode="numeric"> točk
+      <button class="btn primary" id="ambitExport">Izvozi za Ambit</button>
+    </div>
+    <p class="muted" id="ambitRes"></p>
+  </section>
+</div></dialog>
+
+<!-- Posnetki -->
+<dialog id="dlgTracks"><div class="dlg">
+  <h2>Posnetki <button class="x" data-close aria-label="Zapri">×</button></h2>
+  <p class="muted" id="tracksEmpty">Še ni posnetkov. Ko končaš snemanje, se pot shrani sem.</p>
+  <ul class="list" id="tracksList"></ul>
+</div></dialog>
+
+<!-- Konec -->
+<dialog id="dlgFinish"><div class="dlg">
+  <h2>Konec snemanja</h2>
+  <p class="muted" id="finishSum"></p>
+  <input class="txt" id="finishName" placeholder="Ime poti">
+  <div class="row">
+    <button class="btn primary" id="fSaveExp">Shrani in izvozi .gpx</button>
+    <button class="btn" id="fSave">Samo shrani</button>
+  </div>
+  <div class="row">
+    <button class="btn" id="fResume">Nadaljuj snemanje</button>
+    <button class="btn danger" id="fDiscard">Zavrzi</button>
+  </div>
+</div></dialog>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+const store={
+  get(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}},
+  set(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){return false}},
+  del(k){try{localStorage.removeItem(k)}catch(e){}}
+};
+const K={route:'planina.route',target:'planina.target',session:'planina.session',tracks:'planina.tracks'};
+
+/* ---------- formatting ---------- */
+const km=m=>(m/1000).toFixed(m<10000?2:1).replace('.',',');
+function dur(ms,sec=true){ms=Math.max(0,ms);const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor(s%3600/60),r=s%60;
+  return sec?`${h}:${String(m).padStart(2,'0')}:${String(r).padStart(2,'0')}`:`${h}:${String(m).padStart(2,'0')}`}
+const clock=t=>new Date(t).toLocaleTimeString('sl-SI',{hour:'2-digit',minute:'2-digit'});
+let toastT;function toast(msg){let el=$('.toast');if(!el){el=document.createElement('div');el.className='toast';document.body.appendChild(el)}
+  el.textContent=msg;el.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>el.hidden=true,3200)}
+
+/* ---------- geometry ---------- */
+function hav(a,b){const R=6371000,r=Math.PI/180,dLa=(b.lat-a.lat)*r,dLo=(b.lon-a.lon)*r;
+  const x=Math.sin(dLa/2)**2+Math.cos(a.lat*r)*Math.cos(b.lat*r)*Math.sin(dLo/2)**2;return 2*R*Math.asin(Math.sqrt(x))}
+const P=a=>({lat:a[0],lon:a[1],ele:a[2],t:a[3]});
+const C=p=>[+p.lat.toFixed(6),+p.lon.toFixed(6),p.ele==null?null:Math.round(p.ele*10)/10,p.t||null];
+
+function parseGPX(text){
+  const doc=new DOMParser().parseFromString(text,'application/xml');
+  if(doc.getElementsByTagName('parsererror').length) throw new Error('Datoteka ni veljaven GPX.');
+  let nodes=[...doc.getElementsByTagName('trkpt')];
+  if(!nodes.length) nodes=[...doc.getElementsByTagName('rtept')];
+  if(!nodes.length) nodes=[...doc.getElementsByTagName('wpt')];
+  const pts=nodes.map(n=>{const e=n.getElementsByTagName('ele')[0];const v=e?parseFloat(e.textContent):NaN;
+    return {lat:parseFloat(n.getAttribute('lat')),lon:parseFloat(n.getAttribute('lon')),ele:isNaN(v)?null:v}})
+    .filter(p=>isFinite(p.lat)&&isFinite(p.lon));
+  if(pts.length<2) throw new Error('V datoteki ni dovolj točk trase.');
+  const nm=doc.querySelector('trk > name')||doc.querySelector('rte > name')||doc.querySelector('metadata > name');
+  return {name:(nm&&nm.textContent.trim())||'',pts};
+}
+
+/* Hiking time per DIN 33466: 4 km/h on the flat, 300 m/h up, 500 m/h down; the larger part plus half the smaller. */
+function dinMs(distM,up,down){const th=distM/1000/4,tv=up/300+down/500;return (Math.max(th,tv)+Math.min(th,tv)/2)*3600000}
+
+function buildRoute(name,pts){
+  const cum=[0],cu=[0],cd=[0];let up=0,down=0,ref=pts[0].ele;
+  for(let i=1;i<pts.length;i++){
+    cum[i]=cum[i-1]+hav(pts[i-1],pts[i]);
+    const e=pts[i].ele;
+    if(e!=null){ if(ref==null) ref=e; else {const d=e-ref; if(d>=3){up+=d;ref=e} else if(d<=-3){down-=d;ref=e}} }
+    cu[i]=up;cd[i]=down;
+  }
+  const eff=cum.map((d,i)=>d/1000+cu[i]/100); // effort-km: 1 km flat = 100 m of climbing
+  const total=cum[cum.length-1];
+  return {name:name||'Trasa',pts,cum,cu,cd,eff,total,up,down,din:dinMs(total,up,down),hasEle:pts.some(p=>p.ele!=null)};
+}
+
+function project(rt,p,lastAlong){
+  const k=Math.cos(p.lat*Math.PI/180)*111320,ky=110540;
+  const cands=[];let minD=Infinity;
+  for(let i=0;i<rt.pts.length-1;i++){
+    const A=rt.pts[i],B=rt.pts[i+1];
+    const ax=(A.lon-p.lon)*k,ay=(A.lat-p.lat)*ky,bx=(B.lon-p.lon)*k,by=(B.lat-p.lat)*ky;
+    const dx=bx-ax,dy=by-ay,L=dx*dx+dy*dy;
+    let t=L?-(ax*dx+ay*dy)/L:0;t=Math.max(0,Math.min(1,t));
+    const d=Math.hypot(ax+t*dx,ay+t*dy);
+    cands.push({i,t,d});if(d<minD)minD=d;
+  }
+  // on loops and out-and-back routes, prefer the near segment closest to where we were last
+  let best=null,bs=Infinity;
+  for(const c of cands){ if(c.d>minD+25) continue;
+    const along=rt.cum[c.i]+c.t*(rt.cum[c.i+1]-rt.cum[c.i]);
+    const s=Math.abs(along-lastAlong);
+    if(s<bs){bs=s;best={...c,along}} }
+  best.eff=rt.eff[best.i]+best.t*(rt.eff[best.i+1]-rt.eff[best.i]);
+  best.off=best.d;return best;
+}
+
+function simplify(pts,maxN){
+  const n=pts.length;if(n<=maxN) return {pts:pts.slice(),eps:0};
+  const k=Math.cos(pts[0].lat*Math.PI/180)*111320;
+  const xy=pts.map(p=>[p.lon*k,p.lat*110540]);
+  const sd=(p,a,b)=>{const dx=b[0]-a[0],dy=b[1]-a[1],L=dx*dx+dy*dy;let t=L?((p[0]-a[0])*dx+(p[1]-a[1])*dy)/L:0;t=Math.max(0,Math.min(1,t));
+    return Math.hypot(p[0]-a[0]-t*dx,p[1]-a[1]-t*dy)};
+  const run=eps=>{const keep=new Uint8Array(n);keep[0]=keep[n-1]=1;const st=[[0,n-1]];
+    while(st.length){const [a,b]=st.pop();let md=0,mi=-1;for(let i=a+1;i<b;i++){const d=sd(xy[i],xy[a],xy[b]);if(d>md){md=d;mi=i}}
+      if(md>eps){keep[mi]=1;st.push([a,mi],[mi,b])}}return keep};
+  let lo=0,hi=5000,keep=run(hi);
+  for(let it=0;it<32;it++){const mid=(lo+hi)/2,kk=run(mid);if(kk.reduce((s,v)=>s+v,0)<=maxN){hi=mid;keep=kk}else lo=mid}
+  return {pts:pts.filter((_,i)=>keep[i]),eps:hi};
+}
+
+const esc=s=>String(s).replace(/[<>&"']/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&apos;'}[c]));
+function toGPX(name,pts){
+  const body=pts.map(p=>`      <trkpt lat="${p.lat.toFixed(7)}" lon="${p.lon.toFixed(7)}">${p.ele!=null?`<ele>${p.ele.toFixed(1)}</ele>`:''}${p.t?`<time>${new Date(p.t).toISOString()}</time>`:''}</trkpt>`).join('\n');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="PlaninaAPP" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata><name>${esc(name)}</name></metadata>
+  <trk>
+    <name>${esc(name)}</name>
+    <trkseg>
+${body}
+    </trkseg>
+  </trk>
+</gpx>
+`;
+}
+async function saveFile(filename,text){
+  const file=new File([text],filename,{type:'application/gpx+xml'});
+  if(matchMedia('(pointer:coarse)').matches&&navigator.canShare&&navigator.canShare({files:[file]})){
+    try{await navigator.share({files:[file],title:filename});return}catch(e){if(e.name==='AbortError')return}
+  }
+  const url=URL.createObjectURL(file);const a=document.createElement('a');a.href=url;a.download=filename;
+  document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),4000);
+}
+const slug=s=>(s||'pot').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9]+/g,'-').replace(/^-|-$/g,'').toLowerCase()||'pot';
+
+/* ---------- state ---------- */
+let route=null,target=store.get(K.target,null),S=store.get(K.session,null),G=null;
+let watchId=null,wakeLock=null,lastFix=null,follow=true,offWarned=false,saveT=0;
+
+/* ---------- map ---------- */
+let map=null,routeLine=null,trackLine=null,posDot=null,accCircle=null;
+function css(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
+function initMap(){
+  if(!window.L){$('#mapMsg').hidden=false;return}
+  map=L.map('map',{zoomControl:false,attributionControl:true}).setView([46.38,13.84],10);
+  const topo=L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',{maxZoom:17,attribution:'© OpenStreetMap, SRTM | © OpenTopoMap (CC-BY-SA)'});
+  const osm=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'});
+  topo.addTo(map);
+  L.control.layers({'Topografska':topo,'OpenStreetMap':osm},null,{position:'topleft'}).addTo(map);
+  routeLine=L.polyline([],{color:css('--accent'),weight:5,opacity:.85}).addTo(map);
+  trackLine=L.polyline([],{color:css('--track'),weight:4,opacity:.95}).addTo(map);
+  map.on('dragstart',()=>{follow=false;$('#locate').classList.remove('on')});
+}
+function drawRoute(){if(!map)return;routeLine.setLatLngs(route?route.pts.map(p=>[p.lat,p.lon]):[]);
+  if(route)map.fitBounds(routeLine.getBounds(),{padding:[24,24]})}
+function drawTrack(){if(!map)return;trackLine.setLatLngs(S?S.pts.map(a=>[a[0],a[1]]):[])}
+function drawPos(p){if(!map)return;const ll=[p.lat,p.lon];
+  if(!posDot){accCircle=L.circle(ll,{radius:p.acc||20,color:css('--track'),weight:1,fillOpacity:.12,interactive:false}).addTo(map);
+    posDot=L.circleMarker(ll,{radius:7,color:'#fff',weight:3,fillColor:css('--track'),fillOpacity:1}).addTo(map)}
+  else{posDot.setLatLng(ll);accCircle.setLatLng(ll).setRadius(p.acc||20)}
+  if(follow) map.setView(ll,Math.max(map.getZoom(),15),{animate:false});
+}
+
+/* ---------- GPS ---------- */
+function startWatch(){
+  if(!('geolocation' in navigator)){toast('Ta brskalnik ne podpira GPS-a.');return false}
+  if(watchId!=null) return true;
+  watchId=navigator.geolocation.watchPosition(onPos,onPosErr,{enableHighAccuracy:true,maximumAge:0,timeout:30000});
+  return true;
+}
+function stopWatch(){if(watchId!=null){navigator.geolocation.clearWatch(watchId);watchId=null}}
+function onPosErr(e){
+  if(e.code===1) toast('Dostop do lokacije je zavrnjen. Dovoli ga v nastavitvah brskalnika.');
+  else if(e.code===3) toast('Čakam na signal GPS …');
+  else toast('GPS trenutno ni na voljo.');
+}
+function onPos(pos){
+  const c=pos.coords;
+  const p={lat:c.latitude,lon:c.longitude,ele:c.altitude==null?null:c.altitude,t:pos.timestamp||Date.now(),acc:c.accuracy};
+  lastFix=p;drawPos(p);
+  if(route){G=project(route,p,G?G.along:0);checkOff()}
+  if(S&&!S.paused&&c.accuracy<=40){
+    const last=S.pts.length?P(S.pts[S.pts.length-1]):null;
+    if(last){const d=hav(last,p);
+      if(d<4) {render();return}
+      if(d>400&&p.t-last.t<15000){render();return} // ignore GPS jumps
+      S.dist+=d}
+    if(p.ele!=null){ if(S.ref==null) S.ref=p.ele; else {const d=p.ele-S.ref; if(d>=5){S.up+=d;S.ref=p.ele} else if(d<=-5){S.down-=d;S.ref=p.ele}} }
+    S.pts.push(C(p));
+    if(trackLine) trackLine.addLatLng([p.lat,p.lon]);
+    if(Date.now()-saveT>8000){saveT=Date.now();saveSession()}
+  }
+  render();
+}
+function checkOff(){
+  const el=$('#offRoute');
+  if(G.off>60){el.hidden=false;el.textContent=`Odmik od trase: ${Math.round(G.off)} m`;
+    if(!offWarned&&S&&!S.paused){offWarned=true;try{navigator.vibrate&&navigator.vibrate([200,100,200])}catch(e){}}}
+  else{el.hidden=true;if(G.off<35)offWarned=false}
+}
+function saveSession(){if(S&&!store.set(K.session,S))toast('Pomnilnik je poln. Izvozi in izbriši stare posnetke.')}
+
+/* ---------- wake lock ---------- */
+async function wake(){try{if('wakeLock' in navigator&&!wakeLock){wakeLock=await navigator.wakeLock.request('screen');wakeLock.addEventListener('release',()=>wakeLock=null)}}catch(e){}}
+function unwake(){try{wakeLock&&wakeLock.release()}catch(e){}wakeLock=null}
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&S&&!S.paused)wake();if(document.visibilityState==='hidden')saveSession()});
+window.addEventListener('pagehide',saveSession);
+
+/* ---------- render ---------- */
+function elapsed(){if(!S)return 0;const now=S.paused?S.pauseAt:Date.now();return now-S.start-S.pausedMs}
+function setV(id,txt,unit,cls){const el=$(id);el.className='v'+(cls?' '+cls:'');el.textContent=txt;if(unit){const s=document.createElement('small');s.textContent=unit;el.appendChild(s)}}
+function render(){
+  const el=elapsed();
+  setV('#vTime',dur(el));
+  setV('#vDist',km(S?S.dist:0),'km');
+  setV('#vUp',String(Math.round(S?S.up:0)),'m');
+  const sp=S&&el>60000&&S.dist>50?(S.dist/1000)/(el/3600000):null;
+  setV('#vSpeed',sp?sp.toFixed(1).replace('.',','):'–','km/h');
+
+  $('#btnStart').hidden=!!S&&!S.paused;
+  $('#btnStart').textContent=S&&S.paused?'Nadaljuj':'Začni';
+  $('#btnPause').hidden=!S||S.paused;
+  $('#btnFinish').hidden=!S;
+  $('#hint').textContent=S?(S.paused?'Snemanje je na pavzi. Čas ne teče.':'Snemam. Pusti aplikacijo odprto na zaslonu, ko je telefon zaklenjen, brskalnik lahko ustavi GPS.')
+    :(route?'Pritisni Začni, ko si na začetku trase.':'Naloži traso pod »Trasa« ali takoj začni snemati svojo pot.');
+
+  $('#routeStats').hidden=!route;
+  $('#routeLine').hidden=!route;
+  if(!route) {$('#offRoute').hidden=true;return}
+  const rl=$('#routeLine');rl.replaceChildren();
+  const b=document.createElement('b');b.textContent=route.name;rl.append(b);
+  const meta=document.createElement('span');
+  meta.textContent=`${km(route.total)} km`+(route.hasEle?` · ↑ ${Math.round(route.up)} m · ↓ ${Math.round(route.down)} m`:'')+` · ocena ${dur(route.din,false)} h`+(target?` · cilj ${dur(target,false)} h`:'');
+  rl.append(meta);
+
+  const effTot=route.eff[route.eff.length-1]||1e-9;
+  const along=G?G.along:0, effDone=G?G.eff:0;
+  setV('#vRemain',km(route.total-along),'km');
+  let rem;
+  if(S&&el>180000&&along>300&&effDone>0) rem=el*(effTot-effDone)/effDone; // your own pace so far
+  else rem=route.din*(1-effDone/effTot);
+  setV('#vEta',dur(rem,false));
+  setV('#vArrive',S||G?clock(Date.now()+rem):'–');
+  if(target&&S){const delta=target*effDone/effTot-el;const a=Math.abs(delta);
+    setV('#vPlan',(delta>=0?'+':'−')+(a<3600000?`${Math.floor(a/60000)}:${String(Math.floor(a%60000/1000)).padStart(2,'0')}`:dur(a,false)),'',delta>=0?'ok':'bad');
+    $('#vPlan').title=delta>=0?'pred načrtom':'za načrtom';
+  } else setV('#vPlan',target?dur(target,false):'–');
+  drawProfile(along);
+}
+
+function drawProfile(along){
+  const cv=$('#profile');if(!route||cv.offsetParent===null)return;
+  const dpr=window.devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;
+  if(cv.width!==Math.round(W*dpr)){cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr)}
+  const x=cv.getContext('2d');x.setTransform(dpr,0,0,dpr,0,0);x.clearRect(0,0,W,H);
+  const pts=route.pts,cum=route.cum,tot=route.total||1;
+  if(!route.hasEle){x.fillStyle=css('--muted');x.font='12px Inter,sans-serif';x.fillText('Trasa nima podatkov o višini.',0,16);return}
+  const eles=pts.map(p=>p.ele).filter(e=>e!=null);let mn=Math.min(...eles),mx=Math.max(...eles);if(mx-mn<20){mx+=10;mn-=10}
+  const top=14,bot=H-2,X=d=>d/tot*W,Y=e=>bot-(e-mn)/(mx-mn)*(bot-top);
+  const path=()=>{x.beginPath();let first=true;for(let i=0;i<pts.length;i++){if(pts[i].ele==null)continue;const px=X(cum[i]),py=Y(pts[i].ele);first?x.moveTo(px,py):x.lineTo(px,py);first=false}};
+  path();x.lineTo(W,bot);x.lineTo(0,bot);x.closePath();x.fillStyle=css('--line');x.fill();
+  x.save();x.beginPath();x.rect(0,0,X(along),H);x.clip();path();x.lineTo(W,bot);x.lineTo(0,bot);x.closePath();
+  x.globalAlpha=.35;x.fillStyle=css('--track');x.fill();x.restore();
+  path();x.strokeStyle=css('--muted');x.lineWidth=1.5;x.stroke();
+  x.fillStyle=css('--muted');x.font='11px Inter,sans-serif';x.textBaseline='top';
+  x.fillText(`${Math.round(mx)} m`,2,0);const lbl=`${Math.round(mn)} m`;x.textBaseline='bottom';x.fillText(lbl,2,bot-2);
+  if(G){let e=null;for(let i=0;i<cum.length;i++){if(cum[i]>=along&&pts[i].ele!=null){e=pts[i].ele;break}}
+    if(e!=null){x.beginPath();x.arc(X(along),Y(e),4.5,0,7);x.fillStyle=css('--track');x.fill();x.lineWidth=2;x.strokeStyle=css('--surface');x.stroke()}}
+}
+
+/* ---------- controls ---------- */
+$('#btnStart').onclick=()=>{
+  if(S&&S.paused){S.pausedMs+=Date.now()-S.pauseAt;S.paused=false;S.pauseAt=null;saveSession();wake();render();return}
+  if(!startWatch())return;
+  S={start:Date.now(),paused:false,pauseAt:null,pausedMs:0,pts:[],dist:0,up:0,down:0,ref:null,routeName:route?route.name:null};
+  follow=true;$('#locate').classList.add('on');
+  saveSession();drawTrack();wake();render();toast('Snemanje se je začelo.');
+};
+$('#btnPause').onclick=()=>{if(!S)return;S.paused=true;S.pauseAt=Date.now();saveSession();unwake();render()};
+$('#btnFinish').onclick=()=>{
+  if(!S)return;if(!S.paused){S.paused=true;S.pauseAt=Date.now()}
+  $('#finishSum').textContent=`${km(S.dist)} km · ${dur(elapsed())} · ↑ ${Math.round(S.up)} m · ${S.pts.length} točk`;
+  const d=new Date(S.start);
+  $('#finishName').value=S.routeName||`Pot ${d.toLocaleDateString('sl-SI')}`;
+  disarm($('#fDiscard'),'Zavrzi');$('#dlgFinish').showModal();render();
+};
+function finishSave(exp){
+  const name=$('#finishName').value.trim()||'Pot';
+  const rec={id:String(S.start),name,start:S.start,dur:elapsed(),dist:S.dist,up:S.up,down:S.down,pts:S.pts};
+  if(exp) saveFile(`${slug(name)}-${new Date(S.start).toISOString().slice(0,10)}.gpx`,toGPX(name,S.pts.map(P)));
+  const list=store.get(K.tracks,[]);list.unshift(rec);
+  let ok=store.set(K.tracks,list);
+  while(!ok&&list.length>1){list.pop();ok=store.set(K.tracks,list)}
+  if(!ok) toast(exp?'Izvoženo. Za shranjevanje v aplikaciji ni prostora.':'Ni prostora za shranjevanje. Raje izvozi .gpx.');
+  if(!ok&&!exp) return;
+  endSession();$('#dlgFinish').close();if(ok)toast(exp?'Shranjeno in izvoženo.':'Shranjeno pod Posnetki.');
+}
+function endSession(){S=null;G=route&&lastFix?project(route,lastFix,0):null;store.del(K.session);unwake();stopWatch();drawTrack();render()}
+$('#fSave').onclick=()=>finishSave(false);
+$('#fSaveExp').onclick=()=>finishSave(true);
+$('#fResume').onclick=()=>{$('#dlgFinish').close();$('#btnStart').click()};
+$('#fDiscard').onclick=e=>{const b=e.currentTarget;if(!b.dataset.armed){arm(b,'Res zavrzi?');return}endSession();$('#dlgFinish').close();toast('Posnetek zavržen.')};
+function arm(b,t){b.dataset.armed='1';b.classList.add('armed');b.textContent=t;clearTimeout(b._t);b._t=setTimeout(()=>disarm(b,b.dataset.label||'Izbriši'),4000)}
+function disarm(b,t){delete b.dataset.armed;b.classList.remove('armed');b.textContent=t}
+
+$('#locate').onclick=()=>{follow=true;$('#locate').classList.add('on');if(lastFix)drawPos(lastFix);else{startWatch();toast('Iščem položaj …')}};
+
+/* ---------- dialogs ---------- */
+document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>b.closest('dialog').close());
+document.querySelectorAll('dialog').forEach(d=>d.addEventListener('click',e=>{if(e.target===d&&d.id!=='dlgFinish')d.close()}));
+
+$('#openRoute').onclick=()=>{fillRouteDlg();$('#dlgRoute').showModal()};
+function fillRouteDlg(){
+  $('#routeInfo').hidden=!route;$('#ambitSec').hidden=!route;$('#useDin').hidden=!route;
+  if(route) $('#routeInfoTxt').textContent=`${route.name}: ${km(route.total)} km, ${route.pts.length} točk`+(route.hasEle?`, vzpon ${Math.round(route.up)} m, spust ${Math.round(route.down)} m`:'')+`. Ocena hoje po DIN 33466: ${dur(route.din,false)} h.`;
+  $('#tH').value=target?Math.floor(target/3600000):'';$('#tM').value=target?Math.round(target%3600000/60000):'';
+  $('#ambitRes').textContent='';disarm($('#clearRoute'),'Odstrani traso');
+}
+$('#gpxIn').onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  try{const {name,pts}=parseGPX(await f.text());
+    route=buildRoute(name||f.name.replace(/\.gpx$/i,''),pts);G=lastFix?project(route,lastFix,0):null;
+    if(!store.set(K.route,{name:route.name,pts:pts.map(C)})) toast('Trasa je naložena, a je prevelika za trajno shranjevanje.');
+    else toast(`Naložena trasa: ${route.name}`);
+    if(S&&!S.routeName){S.routeName=route.name}
+    drawRoute();fillRouteDlg();render();
+  }catch(err){toast(err.message||'Datoteke ni mogoče prebrati.')}
+  e.target.value='';
+};
+$('#clearRoute').dataset.label='Odstrani traso';
+$('#clearRoute').onclick=e=>{const b=e.currentTarget;if(!b.dataset.armed){arm(b,'Res odstrani?');return}
+  route=null;G=null;store.del(K.route);drawRoute();fillRouteDlg();render();toast('Trasa odstranjena.')};
+$('#saveTarget').onclick=()=>{
+  const h=parseInt($('#tH').value||'0',10),m=parseInt($('#tM').value||'0',10);const ms=(h*60+m)*60000;
+  target=ms>0?ms:null;target?store.set(K.target,target):store.del(K.target);render();toast(target?`Ciljni čas: ${dur(target,false)} h`:'Ciljni čas odstranjen.');
+};
+$('#useDin').onclick=()=>{if(!route)return;const ms=Math.round(route.din/60000)*60000;$('#tH').value=Math.floor(ms/3600000);$('#tM').value=ms%3600000/60000};
+$('#ambitExport').onclick=()=>{
+  if(!route)return;const n=Math.max(10,Math.min(100,parseInt($('#ambitN').value||'90',10)));
+  const r=simplify(route.pts,n);
+  saveFile(`${slug(route.name)}-ambit.gpx`,toGPX(route.name,r.pts));
+  $('#ambitRes').textContent=r.eps?`Iz ${route.pts.length} točk je nastalo ${r.pts.length}. Največji odmik od izvirne trase je ${Math.round(r.eps)} m.`:`Trasa ima že samo ${r.pts.length} točk, izvožena je brez ločenih točk.`;
+};
+
+$('#openTracks').onclick=()=>{fillTracks();$('#dlgTracks').showModal()};
+function fillTracks(){
+  const list=store.get(K.tracks,[]),ul=$('#tracksList');ul.replaceChildren();$('#tracksEmpty').hidden=list.length>0;
+  list.forEach(t=>{
+    const li=document.createElement('li');
+    const n=document.createElement('div');n.className='t';n.textContent=t.name;
+    const m=document.createElement('div');m.className='m';
+    m.textContent=`${new Date(t.start).toLocaleDateString('sl-SI')} · ${km(t.dist)} km · ${dur(t.dur)} · ↑ ${Math.round(t.up)} m`;
+    const row=document.createElement('div');row.className='row';
+    const b1=document.createElement('button');b1.className='btn';b1.textContent='Izvozi .gpx';
+    b1.onclick=()=>saveFile(`${slug(t.name)}-${new Date(t.start).toISOString().slice(0,10)}.gpx`,toGPX(t.name,t.pts.map(P)));
+    const b2=document.createElement('button');b2.className='btn';b2.textContent='Uporabi kot traso';
+    b2.onclick=()=>{const pts=t.pts.map(P).map(p=>({lat:p.lat,lon:p.lon,ele:p.ele}));if(pts.length<2){toast('Posnetek je prekratek.');return}
+      route=buildRoute(t.name,pts);store.set(K.route,{name:route.name,pts:pts.map(C)});
+      if(t.dur){target=t.dur;store.set(K.target,target)}
+      G=lastFix?project(route,lastFix,0):null;drawRoute();render();$('#dlgTracks').close();toast('Trasa nastavljena. Ciljni čas je tvoj prejšnji čas.')};
+    const b3=document.createElement('button');b3.className='btn danger';b3.textContent='Izbriši';b3.dataset.label='Izbriši';
+    b3.onclick=()=>{if(!b3.dataset.armed){arm(b3,'Res izbriši?');return}
+      store.set(K.tracks,store.get(K.tracks,[]).filter(x=>x.id!==t.id));fillTracks()};
+    row.append(b1,b2,b3);li.append(n,m,row);ul.append(li);
+  });
+}
+
+/* ---------- boot ---------- */
+initMap();
+const saved=store.get(K.route,null);
+if(saved&&saved.pts&&saved.pts.length>1){route=buildRoute(saved.name,saved.pts.map(P));drawRoute()}
+if(S){drawTrack();if(map&&S.pts.length&&!route)map.fitBounds(trackLine.getBounds(),{padding:[24,24]});
+  if(!S.paused){startWatch();wake();toast('Snemanje se nadaljuje.')}}
+render();
+setInterval(render,1000);
+window.addEventListener('resize',()=>route&&drawProfile(G?G.along:0));
+</script>
+</body>
+</html>

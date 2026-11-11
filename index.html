@@ -94,6 +94,16 @@ dialog::backdrop{background:rgba(10,14,11,.5)}
 .list .m{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
 .list .row .btn{padding:7px 11px;font-size:13px}
 
+.badge{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted);margin-left:6px;vertical-align:2px}
+.verdict{margin:0;font-weight:600}
+.verdict.ok{color:var(--ok)} .verdict.bad{color:var(--warn)}
+.tblWrap{overflow-x:auto;margin:0 -2px}
+.tbl{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:14px}
+.tbl th{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);text-align:right;padding:6px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+.tbl td{text-align:right;padding:7px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+.tbl th:first-child,.tbl td:first-child{text-align:left}
+.tbl td.ok{color:var(--ok)} .tbl td.bad{color:var(--warn)}
+.tbl tfoot td{font-weight:600;border-bottom:none}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(24px + env(safe-area-inset-bottom,0px));z-index:9999;background:var(--fg);color:var(--bg);
   padding:10px 16px;border-radius:999px;font-weight:600;font-size:14px;max-width:calc(100% - 32px);text-align:center}
 .leaflet-container{font:12px var(--body)}
@@ -180,8 +190,20 @@ dialog::backdrop{background:rgba(10,14,11,.5)}
 <!-- Posnetki -->
 <dialog id="dlgTracks"><div class="dlg">
   <h2>Posnetki <button class="x" data-close aria-label="Zapri">×</button></h2>
-  <p class="muted" id="tracksEmpty">Še ni posnetkov. Ko končaš snemanje, se pot shrani sem.</p>
+  <label class="file" for="actIn">Uvozi aktivnost z ure (.gpx)<input type="file" id="actIn" accept=".gpx,application/gpx+xml,application/xml,text/xml"></label>
+  <p class="muted">V aplikaciji Suunto odpri aktivnost, tapni ⋮ in izvozi GPX. V aplikaciji za Android lahko izbereš kar »Odpri s« ali »Deli« in nato PlaninaAPP.</p>
+  <p class="muted" id="tracksEmpty">Še ni posnetkov. Sem pridejo poti, ki jih posnameš ali uvoziš z ure.</p>
   <ul class="list" id="tracksList"></ul>
+</div></dialog>
+
+<!-- Analiza -->
+<dialog id="dlgAnalysis"><div class="dlg">
+  <h2><span id="anTitle">Analiza</span> <button class="x" data-close aria-label="Zapri">×</button></h2>
+  <p class="muted" id="anSub"></p>
+  <div class="stats" id="anStats"></div>
+  <p class="verdict" id="anVerdict"></p>
+  <div class="tblWrap"><table class="tbl" id="anTable"></table></div>
+  <p class="muted" id="anNote"></p>
 </div></dialog>
 
 <!-- Konec -->
@@ -231,7 +253,8 @@ function parseGPX(text){
   if(!nodes.length) nodes=[...doc.getElementsByTagName('rtept')];
   if(!nodes.length) nodes=[...doc.getElementsByTagName('wpt')];
   const pts=nodes.map(n=>{const e=n.getElementsByTagName('ele')[0];const v=e?parseFloat(e.textContent):NaN;
-    return {lat:parseFloat(n.getAttribute('lat')),lon:parseFloat(n.getAttribute('lon')),ele:isNaN(v)?null:v}})
+    const tm=n.getElementsByTagName('time')[0];const t=tm?Date.parse(tm.textContent.trim()):NaN;
+    return {lat:parseFloat(n.getAttribute('lat')),lon:parseFloat(n.getAttribute('lon')),ele:isNaN(v)?null:v,t:isNaN(t)?null:t}})
     .filter(p=>isFinite(p.lat)&&isFinite(p.lon));
   if(pts.length<2) throw new Error('V datoteki ni dovolj točk trase.');
   const nm=doc.querySelector('trk > name')||doc.querySelector('rte > name')||doc.querySelector('metadata > name');
@@ -287,6 +310,113 @@ function simplify(pts,maxN){
   let lo=0,hi=5000,keep=run(hi);
   for(let it=0;it<32;it++){const mid=(lo+hi)/2,kk=run(mid);if(kk.reduce((s,v)=>s+v,0)<=maxN){hi=mid;keep=kk}else lo=mid}
   return {pts:pts.filter((_,i)=>keep[i]),eps:hi};
+}
+
+/* ---------- activity vs route ---------- */
+function interp(arr,cum,d){ // value of a cumulative array at distance d along the route
+  let lo=0,hi=cum.length-1;if(d<=0)return arr[0];if(d>=cum[hi])return arr[hi];
+  while(hi-lo>1){const m=(lo+hi)>>1;if(cum[m]<=d)lo=m;else hi=m}
+  const f=(d-cum[lo])/((cum[hi]-cum[lo])||1);return arr[lo]+f*(arr[hi]-arr[lo]);
+}
+function splitStep(total){for(const s of [500,1000,2000,2500,5000,10000,20000])if(total/s<=8)return s;return 50000}
+function analyze(rt,pts){
+  const timed=pts.filter(p=>p.t);
+  if(timed.length<2) return {ok:false,msg:'Aktivnost nima časovnih podatkov, zato je ni mogoče primerjati.'};
+  const rows=[];let along=0;
+  for(const p of timed){const pr=project(rt,p,along);if(pr.off<=80){along=pr.along;rows.push({d:pr.along,t:p.t})}}
+  if(rows.length<2) return {ok:false,msg:'Aktivnost ne poteka po tej trasi.'};
+  const T=rt.total,nearStart=Math.min(150,T*0.1),nearEnd=Math.max(T-80,T*0.95);
+  const k=rows.findIndex(r=>r.d>Math.min(300,T*0.2));
+  if(k<0) return {ok:false,msg:'Na trasi si prehodil premalo za primerjavo.'};
+  let s=-1;for(let i=k-1;i>=0;i--){if(rows[i].d<=nearStart){s=i;break}}
+  if(s<0) return {ok:false,msg:'Aktivnost se ne začne na začetku te trase.'};
+  const start=rows[s].t;
+  const cross=B=>{for(let i=Math.max(s+1,1);i<rows.length;i++){if(rows[i].d>=B){const a=rows[i-1],b=rows[i];
+    const f=b.d>a.d?(B-a.d)/(b.d-a.d):1;return a.t+Math.max(0,Math.min(1,f))*(b.t-a.t)}}return null};
+  const fin=cross(nearEnd);
+  const reached=Math.max(...rows.slice(s).map(r=>r.d));
+  const step=splitStep(T),bounds=[];for(let b=step;b<T-step*0.3;b+=step)bounds.push(b);bounds.push(T);
+  const effTot=rt.eff[rt.eff.length-1]||1e-9;
+  const splits=[];let prevB=0,prevT=start;
+  for(const B of bounds){const tB=B===T?fin:cross(B);
+    splits.push({a:prevB,b:B,up:interp(rt.cu,rt.cum,B)-interp(rt.cu,rt.cum,prevB),
+      effShare:(interp(rt.eff,rt.cum,B)-interp(rt.eff,rt.cum,prevB))/effTot,
+      time:tB!=null&&prevT!=null?tB-prevT:null,at:tB!=null?tB-start:null});
+    prevB=B;prevT=tB;}
+  return {ok:true,start,total:fin!=null?fin-start:null,done:fin!=null,reached,splits};
+}
+function trackStats(pts){
+  let dist=0,up=0,down=0,ref=null;
+  for(let i=0;i<pts.length;i++){const p=pts[i];if(i)dist+=hav(pts[i-1],p);
+    if(p.ele!=null){if(ref==null)ref=p.ele;else{const d=p.ele-ref;if(d>=3){up+=d;ref=p.ele}else if(d<=-3){down-=d;ref=p.ele}}}}
+  const ts=pts.filter(p=>p.t).map(p=>p.t);
+  return {dist,up,down,start:ts.length?Math.min(...ts):Date.now(),dur:ts.length>1?Math.max(...ts)-Math.min(...ts):0};
+}
+function importActivity(text,filename){
+  let g;try{g=parseGPX(text)}catch(e){toast(e.message);return}
+  if(!g.pts.some(p=>p.t)){toast('Ta .gpx nima časov. To je trasa, ne aktivnost; naloži jo pod »Trasa«.');return}
+  const st=trackStats(g.pts);
+  const list=store.get(K.tracks,[]);
+  if(list.some(t=>t.start===st.start)){toast('Ta aktivnost je že uvožena.');openAnalysisById(String(st.start));return}
+  const name=g.name||String(filename||'').replace(/\.gpx$/i,'')||`Aktivnost ${new Date(st.start).toLocaleDateString('sl-SI')}`;
+  const rec={id:String(st.start),name,start:st.start,dur:st.dur,dist:st.dist,up:st.up,down:st.down,src:'ura',pts:g.pts.map(C)};
+  list.unshift(rec);list.sort((a,b)=>b.start-a.start);
+  if(!store.set(K.tracks,list)){toast('Za shranjevanje ni prostora. Izbriši starejše posnetke.');return}
+  if($('#dlgTracks').open)fillTracks();
+  if(route) openAnalysis(rec); else toast(`Uvoženo: ${name}. Naloži traso pod »Trasa« za primerjavo časa.`);
+}
+window.planinaImport=importActivity;
+
+const signed=ms=>{const a=Math.abs(ms),s=Math.round(a/1000);const t=s<3600?`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`:dur(a,false);return (ms<0?'−':'+')+t};
+function showAn(){const d=$('#dlgAnalysis');if(!d.open)d.showModal()}
+function openAnalysisById(id){const t=store.get(K.tracks,[]).find(x=>x.id===id);if(t&&route)openAnalysis(t)}
+function openAnalysis(rec){
+  if(!route){toast('Najprej naloži traso pod »Trasa«.');return}
+  const res=analyze(route,rec.pts.map(P));
+  $('#anTitle').textContent=rec.name;
+  $('#anSub').textContent=`${new Date(rec.start).toLocaleString('sl-SI',{dateStyle:'medium',timeStyle:'short'})} · primerjava s traso ${route.name}`;
+  const box=$('#anStats');box.replaceChildren();$('#anTable').replaceChildren();$('#anNote').textContent='';
+  const v=$('#anVerdict');v.className='verdict';v.textContent='';
+  const card=(l,val,unit,cls)=>{const d=document.createElement('div');d.className='stat';const a=document.createElement('div');a.className='l';a.textContent=l;
+    const b=document.createElement('div');b.className='v'+(cls?' '+cls:'');b.textContent=val;if(unit){const s=document.createElement('small');s.textContent=unit;b.append(s)}d.append(a,b);box.append(d)};
+  if(!res.ok){v.textContent=res.msg;v.classList.add('bad');showAn();return}
+
+  // other attempts on this route, to compare against the best one
+  const others=store.get(K.tracks,[]).filter(t=>t.id!==rec.id).map(t=>({t,r:analyze(route,t.pts.map(P))})).filter(o=>o.r.ok&&o.r.done);
+  const best=others.reduce((b,o)=>!b||o.r.total<b.r.total?o:b,null);
+  const plan=target||route.din,planLbl=target?'ciljni čas':'ocena DIN';
+
+  if(res.done){
+    card('Čas na trasi',dur(res.total));
+    card(target?'Cilj':'Ocena DIN',dur(plan,false));
+    const dp=plan-res.total;card('Proti načrtu',signed(dp),'',dp>=0?'ok':'bad');
+    if(best){const db=best.r.total-res.total;card('Proti najboljšemu',signed(db),'',db>=0?'ok':'bad')}
+    else card('Poskusov',String(others.length+1));
+    const all=[res.total,...others.map(o=>o.r.total)].sort((a,b)=>a-b),rank=all.indexOf(res.total)+1;
+    if(others.length&&rank===1){v.textContent=`Najboljši čas na tej trasi, za ${dur(best.r.total-res.total)} hitreje od prejšnjega rekorda.`;v.classList.add('ok')}
+    else if(others.length){v.textContent=`${rank}. najboljši od ${all.length} poskusov na tej trasi.`}
+    else{v.textContent=dp>=0?`Za ${signed(dp).slice(1)} hitreje od načrta (${planLbl}).`:`Za ${signed(dp).slice(1)} počasneje od načrta (${planLbl}).`;v.classList.add(dp>=0?'ok':'bad')}
+  } else {
+    card('Prehojeno',km(res.reached),'km');card('Trasa',km(route.total),'km');
+    card('Opravljeno',String(Math.round(res.reached/route.total*100)),'%');
+    const last=res.splits.filter(s=>s.at!=null).pop();card('Čas do tam',last?dur(last.at,false):'–');
+    v.textContent='Trase nisi prehodil do konca, zato skupnega časa ni. Spodaj so časi odsekov, ki si jih opravil.';
+  }
+
+  const tbl=$('#anTable');
+  const head=['Odsek (km)','Vzpon','Čas','Proti načrtu'];if(best)head.push('Proti najb.');
+  const thead=document.createElement('thead'),tr=document.createElement('tr');head.forEach(h=>{const th=document.createElement('th');th.textContent=h;tr.append(th)});thead.append(tr);tbl.append(thead);
+  const tb=document.createElement('tbody');
+  res.splits.forEach((s,i)=>{const r=document.createElement('tr');
+    const cells=[`${km(s.a)}–${km(s.b)}`,`${Math.round(s.up)} m`,s.time!=null?dur(s.time):'–'];
+    const td=(txt,cls)=>{const c=document.createElement('td');c.textContent=txt;if(cls)c.className=cls;return c};
+    cells.forEach(c=>r.append(td(c)));
+    if(s.time!=null){const d=plan*s.effShare-s.time;r.append(td(signed(d),d>=0?'ok':'bad'))}else r.append(td('–'));
+    if(best){const bs=best.r.splits[i];if(s.time!=null&&bs&&bs.time!=null){const d=bs.time-s.time;r.append(td(signed(d),d>=0?'ok':'bad'))}else r.append(td('–'))}
+    tb.append(r)});
+  tbl.append(tb);
+  $('#anNote').textContent=`Načrt za odseke je ${planLbl}, razdeljen po napornosti odseka (1 km ravnine šteje kot 100 m vzpona). Zeleno pomeni hitreje, oranžno počasneje.`+(best?` Najboljši poskus: ${new Date(best.t.start).toLocaleDateString('sl-SI')}, ${dur(best.r.total)}.`:'');
+  showAn();
 }
 
 const esc=s=>String(s).replace(/[<>&"']/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&apos;'}[c]));
@@ -524,12 +654,14 @@ $('#ambitExport').onclick=()=>{
   $('#ambitRes').textContent=r.eps?`Iz ${route.pts.length} točk je nastalo ${r.pts.length}. Največji odmik od izvirne trase je ${Math.round(r.eps)} m.`:`Trasa ima že samo ${r.pts.length} točk, izvožena je brez ločenih točk.`;
 };
 
+$('#actIn').onchange=async e=>{const f=e.target.files[0];if(!f)return;importActivity(await f.text(),f.name);e.target.value=''};
 $('#openTracks').onclick=()=>{fillTracks();$('#dlgTracks').showModal()};
 function fillTracks(){
   const list=store.get(K.tracks,[]),ul=$('#tracksList');ul.replaceChildren();$('#tracksEmpty').hidden=list.length>0;
   list.forEach(t=>{
     const li=document.createElement('li');
     const n=document.createElement('div');n.className='t';n.textContent=t.name;
+    if(t.src==='ura'){const bd=document.createElement('span');bd.className='badge';bd.textContent='z ure';n.append(bd)}
     const m=document.createElement('div');m.className='m';
     m.textContent=`${new Date(t.start).toLocaleDateString('sl-SI')} · ${km(t.dist)} km · ${dur(t.dur)} · ↑ ${Math.round(t.up)} m`;
     const row=document.createElement('div');row.className='row';
@@ -543,7 +675,9 @@ function fillTracks(){
     const b3=document.createElement('button');b3.className='btn danger';b3.textContent='Izbriši';b3.dataset.label='Izbriši';
     b3.onclick=()=>{if(!b3.dataset.armed){arm(b3,'Res izbriši?');return}
       store.set(K.tracks,store.get(K.tracks,[]).filter(x=>x.id!==t.id));fillTracks()};
-    row.append(b1,b2,b3);li.append(n,m,row);ul.append(li);
+    const b0=document.createElement('button');b0.className='btn primary';b0.textContent='Analiza';
+    b0.onclick=()=>{if(!route){toast('Najprej naloži traso pod »Trasa«.');return}openAnalysis(t)};
+    row.append(b0,b1,b2,b3);li.append(n,m,row);ul.append(li);
   });
 }
 

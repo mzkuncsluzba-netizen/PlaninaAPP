@@ -4,6 +4,8 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
+import android.provider.OpenableColumns;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
@@ -21,6 +23,10 @@ import android.widget.Toast;
 
 import androidx.webkit.WebViewAssetLoader;
 
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 
@@ -34,6 +40,8 @@ public class MainActivity extends Activity {
     private GeolocationPermissions.Callback geoCallback;
     private String geoOrigin;
     private String pendingText;
+    private String pendingImport, pendingImportName;
+    private boolean pageReady = false;
 
     @Override
     protected void onCreate(Bundle saved) {
@@ -60,6 +68,12 @@ public class MainActivity extends Activity {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
                 return loader.shouldInterceptRequest(req.getUrl());
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                pageReady = true;
+                deliverImport();
             }
 
             @Override
@@ -106,6 +120,82 @@ public class MainActivity extends Activity {
 
         if (saved != null) web.restoreState(saved);
         else web.loadUrl(START);
+
+        handleIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIntent(intent);
+    }
+
+    /** Reads a .gpx shared or opened from another app (e.g. the Suunto app) and hands it to the page. */
+    private void handleIntent(Intent intent) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        Uri uri = null;
+        String inlineText = null;
+        if (Intent.ACTION_SEND.equals(action)) {
+            uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (uri == null) inlineText = intent.getStringExtra(Intent.EXTRA_TEXT);
+        } else if (Intent.ACTION_VIEW.equals(action)) {
+            uri = intent.getData();
+        } else {
+            return;
+        }
+        intent.setAction(Intent.ACTION_MAIN); // don't import the same file again after rotation
+
+        String name = "aktivnost.gpx";
+        String text = inlineText;
+        if (uri != null) {
+            name = displayName(uri);
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                ByteArrayOutputStream buf = new ByteArrayOutputStream();
+                byte[] b = new byte[65536];
+                int n;
+                while ((n = in.read(b)) > 0) {
+                    buf.write(b, 0, n);
+                    if (buf.size() > 40 * 1024 * 1024) break;
+                }
+                byte[] all = buf.toByteArray();
+                if (all.length > 12 && all[8] == '.' && all[9] == 'F' && all[10] == 'I' && all[11] == 'T') {
+                    Toast.makeText(this, "To je datoteka FIT. V aplikaciji Suunto izberi izvoz v GPX.", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                text = new String(all, StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                Toast.makeText(this, "Datoteke ni bilo mogoče prebrati.", Toast.LENGTH_LONG).show();
+                return;
+            }
+        }
+        if (text == null || !text.contains("<gpx")) {
+            Toast.makeText(this, "To ni datoteka .gpx.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        pendingImport = text;
+        pendingImportName = name;
+        deliverImport();
+    }
+
+    private void deliverImport() {
+        if (!pageReady || pendingImport == null) return;
+        String js = "window.planinaImport&&window.planinaImport(" + JSONObject.quote(pendingImport)
+                + "," + JSONObject.quote(pendingImportName) + ")";
+        pendingImport = null;
+        web.evaluateJavascript(js, null);
+    }
+
+    private String displayName(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                String n = c.getString(0);
+                if (n != null) return n;
+            }
+        } catch (Exception ignored) { }
+        String last = uri.getLastPathSegment();
+        return last != null ? last : "aktivnost.gpx";
     }
 
     private boolean hasLocation() {

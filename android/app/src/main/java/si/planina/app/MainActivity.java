@@ -26,8 +26,15 @@ import androidx.webkit.WebViewAssetLoader;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.nio.charset.StandardCharsets;
 
 public class MainActivity extends Activity {
@@ -60,8 +67,9 @@ public class MainActivity extends Activity {
         s.setGeolocationEnabled(true);
         s.setAllowFileAccess(false);
 
+        dropStaleLocalPage();
         final WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
-                .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
+                .addPathHandler("/assets/", new PageHandler())
                 .build();
 
         web.setWebViewClient(new WebViewClient() {
@@ -203,8 +211,105 @@ public class MainActivity extends Activity {
                 || checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
     }
 
+    /* ---------- in-app updates: the page is downloaded from GitHub Pages and kept on the phone ---------- */
+    private static final String PAGE_URL = "https://mzkuncsluzba-netizen.github.io/PlaninaAPP/index.html";
+    private static final Pattern VERSION = Pattern.compile("<meta name=\"planina-version\" content=\"(\\d+)\"");
+
+    private File localPage() { return new File(getFilesDir(), "web/index.html"); }
+
+    private static int parseVersion(String html) {
+        Matcher m = VERSION.matcher(html);
+        return m.find() ? Integer.parseInt(m.group(1)) : 0;
+    }
+
+    private static String readAll(InputStream in) throws Exception {
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        byte[] b = new byte[65536];
+        int n;
+        while ((n = in.read(b)) > 0) buf.write(b, 0, n);
+        return new String(buf.toByteArray(), StandardCharsets.UTF_8);
+    }
+
+    private int bundledVersion() {
+        try (InputStream in = getAssets().open("index.html")) { return parseVersion(readAll(in)); }
+        catch (Exception e) { return 0; }
+    }
+
+    private int localVersion() {
+        File f = localPage();
+        if (!f.exists()) return 0;
+        try (InputStream in = new FileInputStream(f)) { return parseVersion(readAll(in)); }
+        catch (Exception e) { return 0; }
+    }
+
+    private int currentVersion() { return Math.max(bundledVersion(), localVersion()); }
+
+    /** A newer APK may carry a newer page than the downloaded copy; then the copy goes. */
+    private void dropStaleLocalPage() {
+        File f = localPage();
+        if (f.exists() && localVersion() < bundledVersion()) f.delete();
+    }
+
+    private class PageHandler implements WebViewAssetLoader.PathHandler {
+        private final WebViewAssetLoader.AssetsPathHandler assets = new WebViewAssetLoader.AssetsPathHandler(MainActivity.this);
+
+        @Override
+        public WebResourceResponse handle(String path) {
+            if ("index.html".equals(path)) {
+                File f = localPage();
+                if (f.exists()) {
+                    try { return new WebResourceResponse("text/html", "utf-8", new FileInputStream(f)); }
+                    catch (Exception ignored) { }
+                }
+            }
+            return assets.handle(path);
+        }
+    }
+
+    private void checkUpdate(final boolean manual) {
+        new Thread(() -> {
+            String result;
+            int remote = 0;
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL(PAGE_URL + "?t=" + System.currentTimeMillis()).openConnection();
+                c.setUseCaches(false);
+                c.setConnectTimeout(10000);
+                c.setReadTimeout(20000);
+                if (c.getResponseCode() != 200) throw new Exception("HTTP " + c.getResponseCode());
+                String html;
+                try (InputStream in = c.getInputStream()) { html = readAll(in); }
+                remote = parseVersion(html);
+                if (remote <= 0 || !html.contains("<title>PlaninaAPP</title>")) {
+                    result = "error";
+                } else if (remote <= currentVersion()) {
+                    result = "current";
+                } else {
+                    File f = localPage();
+                    f.getParentFile().mkdirs();
+                    File tmp = new File(f.getParentFile(), "index.html.tmp");
+                    try (OutputStream os = new FileOutputStream(tmp)) { os.write(html.getBytes(StandardCharsets.UTF_8)); }
+                    if (!tmp.renameTo(f)) throw new Exception("rename");
+                    result = "updated";
+                }
+            } catch (Exception e) {
+                result = "offline";
+            }
+            final String js = "window.planinaUpdateResult&&window.planinaUpdateResult('" + result + "'," + remote + "," + manual + ")";
+            runOnUiThread(() -> web.evaluateJavascript(js, null));
+        }).start();
+    }
+
     /** Called from the page to save an exported .gpx through Android's own "Save as" screen. */
     private class Bridge {
+        @JavascriptInterface
+        public void checkUpdate(boolean manual) { MainActivity.this.checkUpdate(manual); }
+
+        @JavascriptInterface
+        public String apkVersion() {
+            try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; }
+            catch (Exception e) { return "?"; }
+        }
+
         @JavascriptInterface
         public void saveFile(final String name, final String text) {
             runOnUiThread(() -> {

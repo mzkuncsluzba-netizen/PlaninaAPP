@@ -1,0 +1,2245 @@
+#include <jni.h>
+#include <android/log.h>
+#include <string>
+#include <sstream>
+#include <iomanip>
+#include <cstring>
+#include <ctime>
+#include <vector>
+#include <algorithm>
+#include <set>
+#include <cmath>
+#include <climits>
+#include <cstdint>
+#include <pthread.h>
+
+// ─── libambit ─────────────────────────────────────────────────────────────────
+#include "libambit/libambit.h"
+#include "libambit/libambit_int.h"
+#include "device_driver_ambit3_navigation.h"
+// pmem20.h has no extern "C" guard (like protocol.h) - wrap it so its libambit_pmem20_data_write
+// (the chunked 0x0b16 raw flash write) links against the C libambit.a. Used by
+// nativeAmbitWriteLegacyRegion for the Ambit1/2 sport-mode + nav restore writes.
+extern "C" {
+#include "libambit/pmem20.h"
+#include "libambit/device_support.h"  // libambit_device_support_find_first -> per-model driver_param
+}
+
+// libambit_protocol_command lives in protocol.h, which (unlike libambit.h) has no extern "C"
+// guard - including it from this C++ TU would mangle the name and fail to link against the C
+// libambit.a. Forward-declare it with C linkage instead (used for the legacy 0x0b00/0x0b01
+// personal-settings read-modify-write). Buffers are freed with plain free() - the existing
+// nativeAmbitReadPoiListRaw comment confirms libambit_protocol_free() is exactly that.
+extern "C" int libambit_protocol_command(ambit_object_t *object, uint16_t command,
+                                         uint8_t *data, size_t datalen,
+                                         uint8_t **reply_data, size_t *replylen,
+                                         uint8_t legacy_format);
+
+// libambit_new_from_fd() est déclaré dans libambit_android.c
+extern "C" ambit_object_t *libambit_new_from_fd(int fd, int ep_in, int ep_out,
+                                                 uint16_t vid, uint16_t pid);
+
+// libambit_new_from_ble() is declared in libambit_android.c. BLE-only —
+// see protocol_ble.c and HANDOFF.md Milestone 7 (2026-08-06 entry) for why
+// USB and BLE need separate constructors (different wire framing, not just
+// a different transport under the same framing).
+extern "C" ambit_object_t *libambit_new_from_ble(JavaVM *jvm, jobject module_ref_local,
+                                                  JNIEnv *env, uint16_t vid, uint16_t pid);
+
+// ambit_ble_on_notify() is declared in protocol_ble.c — feeds raw GATT
+// notification bytes into the BLE frame reassembly/CRC-check logic.
+extern "C" void ambit_ble_on_notify(ambit_object_t *object, const uint8_t *data, size_t len);
+
+// ambit3_write_route_to_watch() est déclarée dans device_driver_ambit3.c
+extern "C" int ambit3_write_route_to_watch(ambit_object_t *object,
+                                            const ambit3_nav_route_t *routes,
+                                            size_t route_count);
+
+// ambit3_add_poi_to_watch() est déclarée dans device_driver_ambit3.c
+extern "C" int ambit3_add_poi_to_watch(ambit_object_t *object,
+                                        const char *name, double lat, double lon, int type);
+
+extern "C" int ambit3_set_poi_list(ambit_object_t *object, const uint8_t *expected, size_t expected_len,
+                                   const uint8_t *new_list, size_t new_len);
+
+// ambit3_read_flash_region() / ambit3_read_poi_list_raw() / ambit3_read_object_by_id_raw()
+// sont déclarées dans device_driver_ambit3.c
+extern "C" int ambit3_read_flash_region(ambit_object_t *object, uint32_t address, uint32_t length, uint8_t *out_buffer);
+extern "C" int ambit3_read_poi_list_raw(ambit_object_t *object, uint8_t **out, size_t *out_len);
+extern "C" int ambit3_read_memory_map_raw(ambit_object_t *object, uint8_t **out, size_t *out_len);
+// Firmware flasher (firmware_flash_android.c). See its header comment for the re-enumeration
+// dance Kotlin orchestrates around these.
+extern "C" int ambit3_fw_enter_bsl(ambit_object_t *object);
+extern "C" int ambit3_fw_reboot(ambit_object_t *object);
+extern "C" int ambit3_fw_stream(ambit_object_t *object, const uint8_t *header, size_t header_len,
+                                const uint8_t *payload, size_t payload_len, int do_commit, int resume);
+// Display-only progress of the stream above (stage, chunks done, chunks total).
+extern "C" void ambit3_fw_progress(int *stage, int *done, int *total);
+extern "C" void ambit3_fw_progress_reset(void);
+extern "C" int ambit3_read_object_by_id_raw(ambit_object_t *object, uint8_t entry_id, uint8_t **out, size_t *out_len);
+extern "C" int ambit3_read_settings_raw(ambit_object_t *object, uint8_t **out, size_t *out_len);
+extern "C" int ambit3_write_settings_raw(ambit_object_t *object, const uint8_t *data, size_t datalen, uint8_t **out, size_t *out_len);
+extern "C" int ambit3_read_custom_modes_raw(ambit_object_t *object, uint8_t *out_buffer);
+extern "C" int ambit3_write_custom_modes_raw(ambit_object_t *object, const uint8_t *data, size_t datalen);
+extern "C" int ambit3_write_region_raw(ambit_object_t *object, uint32_t base, const uint8_t *data, size_t extent);
+
+#undef  LOG_TAG
+#define LOG_TAG "AmbitJNI"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+// ─── Base64 (pour renvoyer des blobs bruts — régions flash, liste POI — à JS) ──
+
+static std::string base64Encode(const uint8_t *data, size_t len)
+{
+    static const char table[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((len + 2) / 3) * 4);
+    size_t i = 0;
+    while (i + 3 <= len) {
+        uint32_t n = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+        out += table[(n >> 18) & 0x3F];
+        out += table[(n >> 12) & 0x3F];
+        out += table[(n >> 6) & 0x3F];
+        out += table[n & 0x3F];
+        i += 3;
+    }
+    size_t rem = len - i;
+    if (rem == 1) {
+        uint32_t n = data[i] << 16;
+        out += table[(n >> 18) & 0x3F];
+        out += table[(n >> 12) & 0x3F];
+        out += "==";
+    } else if (rem == 2) {
+        uint32_t n = (data[i] << 16) | (data[i + 1] << 8);
+        out += table[(n >> 18) & 0x3F];
+        out += table[(n >> 12) & 0x3F];
+        out += table[(n >> 6) & 0x3F];
+        out += "=";
+    }
+    return out;
+}
+
+static std::string jsonEscape(const char *s)
+{
+    std::string out;
+    if (!s) return out;
+    for (const char *p = s; *p; p++) {
+        if (*p == '"' || *p == '\\') out += '\\';
+        if ((unsigned char)*p < 0x20) continue; // drop control chars, keep it simple
+        out += *p;
+    }
+    return out;
+}
+
+// ─── État global ──────────────────────────────────────────────────────────────
+
+static ambit_object_t *g_device = nullptr;
+
+// Cache des logs lus (rempli lors de nativeAmbitGetLogCount, consommé par nativeAmbitGetLogAsGpx)
+static std::vector<std::string> g_log_cache;
+
+// Parallel to g_log_cache (same index): each read move's native FIT, base64-encoded (or "" for a
+// move with no usable samples). Consumed by nativeAmbitGetLogAsFit. Cleared everywhere
+// g_log_cache is. See fitexport::build / log_push_callback.
+static std::vector<std::string> g_log_fit_b64;
+
+// Parallel to g_log_cache: each read move's own header date_time, kept so
+// nativeAmbitMarkReadLogsSynced can rebuild the minimal ambit_log_entry_t that
+// libambit_log_synced() needs (it reads only header.date_time - see
+// device_driver_ambit3.c's log_synced()). Same index as g_log_cache/getLogAsGpx.
+static std::vector<ambit_date_time_t> g_log_dates;
+
+// Publishes the in-construction BLE object to g_device DURING libambit_new_from_ble,
+// so incoming notifications route to it while the server-side handshake (which runs
+// inside that call, before it returns) is waiting for the watch's frames. Without
+// this, nativeAmbitBleOnNotify's `if (!g_device) return` drops every handshake frame
+// because g_device isn't assigned until the call returns. Called from
+// libambit_android.c. (2026-08-09, HANDOFF.md Milestone 7 item 9.)
+extern "C" void jni_ble_set_active_object(ambit_object_t *obj) {
+    g_device = obj;
+}
+
+// ─── Pre-init RX stash (2026-08-09) ────────────────────────────────────────────
+// The watch's opening frame reaches nativeAmbitBleOnNotify (binder thread) the
+// instant it subscribes to our notify CCCD — which is BEFORE nativeAmbitBleInit
+// (executor thread) has run far enough to publish g_device. The old
+// `if (!g_device) return` guard silently dropped those bytes. The Ambit3 masks
+// this by re-sending its 0x1201 opener every ~5s, but the Kailash (Hoopoe) sends
+// its 0x0002 hello exactly once, so the dropped hello hung the handshake for the
+// full 20s timeout with zero frames seen.
+//
+// Fix: until the handshake is armed (g_rx_ready), stash incoming bytes in order
+// instead of dropping them; the handshake calls jni_ble_flush_rx_stash() once
+// g_device + handshake_mode are live to replay them and switch to live feed. The
+// stash-vs-live decision, the replay, and the ready flip all happen under
+// g_rx_mtx, so a write racing the flip is serialized (stashed-then-replayed or
+// fed-live, never lost or reordered). Armed fresh at scanAndConnect() time via
+// jni_ble_reset_rx_stash() (before the watch can write), which also covers
+// reconnects without an app restart.
+static pthread_mutex_t g_rx_mtx = PTHREAD_MUTEX_INITIALIZER;
+static std::vector<uint8_t> g_rx_stash;
+static bool g_rx_ready = false;   // false: stash incoming bytes; true: feed live
+
+extern "C" void jni_ble_reset_rx_stash(void) {
+    pthread_mutex_lock(&g_rx_mtx);
+    g_rx_ready = false;
+    g_rx_stash.clear();
+    pthread_mutex_unlock(&g_rx_mtx);
+}
+
+extern "C" void jni_ble_flush_rx_stash(void) {
+    pthread_mutex_lock(&g_rx_mtx);
+    if (g_device && !g_rx_stash.empty()) {
+        LOGI("BLE rx stash: replaying %zu pre-init bytes into the handshake",
+             g_rx_stash.size());
+        ambit_ble_on_notify(g_device, g_rx_stash.data(), g_rx_stash.size());
+    }
+    g_rx_stash.clear();
+    g_rx_ready = true;
+    pthread_mutex_unlock(&g_rx_mtx);
+}
+
+// IDs des activités déjà synchronisées — format "YYYYMMDDTHHMMSS"
+// Rempli par nativeAmbitGetLogCount avant chaque lecture
+static std::set<std::string> g_known_dates;
+
+// Formate la date d'un header en ID comparable à ceux stockés en DB
+static std::string formatLogId(const ambit_log_header_t *h)
+{
+    char buf[20];
+    snprintf(buf, sizeof(buf), "%04d%02d%02dT%02d%02d%02d",
+             h->date_time.year, h->date_time.month, h->date_time.day,
+             h->date_time.hour, h->date_time.minute,
+             (int)(h->date_time.msec / 1000));
+    return std::string(buf);
+}
+
+// ─── Conversion log → GPX ─────────────────────────────────────────────────────
+//
+// ambit_log_entry_t contient :
+//   - header.date_time  (ambit_date_time_t : year/month/day/hour/minute/msec)
+//   - header.activity_name, header.duration (ms), header.distance (m), header.ascent (m)
+//   - samples : tableau de ambit_log_sample_t
+//
+// Types de samples avec coordonnées GPS :
+//   ambit_log_sample_type_gps_base  → u.gps_base.latitude/longitude/altitude (×10^-7, ×0.01 m)
+//   ambit_log_sample_type_gps_small → u.gps_small.latitude/longitude
+//   ambit_log_sample_type_gps_tiny  → u.gps_tiny.latitude/longitude
+//   ambit_log_sample_type_periodic  → u.periodic.values[] contenant lat/lon séparément
+
+static std::string convertEntryToGpx(const ambit_log_entry_t *entry)
+{
+    std::ostringstream gpx;
+
+    // Formater la date ISO 8601
+    char date_buf[32];
+    snprintf(date_buf, sizeof(date_buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+             entry->header.date_time.year,
+             entry->header.date_time.month,
+             entry->header.date_time.day,
+             entry->header.date_time.hour,
+             entry->header.date_time.minute,
+             (int)(entry->header.date_time.msec / 1000));
+
+    // activity_name peut être non-null mais pointer vers une chaîne vide (NUL)
+    const char *act_raw  = entry->header.activity_name;
+    bool        act_ok   = act_raw && act_raw[0] != '\0';
+    uint8_t     act_type = entry->header.activity_type;
+
+    __android_log_print(ANDROID_LOG_DEBUG, "AmbitJNI",
+        "Activity: name='%s' sport_type=0x%02x(%d)",
+        act_raw ? act_raw : "(null)", act_type, act_type);
+
+    gpx << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        << "<gpx version=\"1.1\" creator=\"AmbitSyncModern\""
+        << " xmlns=\"http://www.topografix.com/GPX/1/1\""
+        << " xmlns:gpxtpx=\"http://www.garmin.com/xmlschemas/TrackPointExtension/v1\">\n"
+        << "  <metadata><time>" << date_buf << "</time></metadata>\n"
+        << "  <trk><name>" << (act_ok ? act_raw : "") << "</name>\n"
+        << "    <extensions>\n"
+        << "      <duration>"    << entry->header.duration / 1000 << "</duration>\n"
+        << "      <distance>"    << entry->header.distance         << "</distance>\n"
+        << "      <ascent>"      << entry->header.ascent           << "</ascent>\n"
+        << "      <sport_type>"  << (int)act_type                  << "</sport_type>\n";
+    // The watch's own summary of the move, as the desktop writes it (tools/exercise_log.py):
+    // calories, heart rate, cadence, speed, descent, recovery, peak training effect. The app
+    // reads them for the activity's calories and its list columns (GpxParser extTag); without
+    // them every move synced on Android had 0 kcal (tablet audit, 2026-10-31). Units as on the
+    // desktop: kcal, bpm, rpm, m/h, m, s, effect x10. Every driver hands over the header that
+    // pmem20 parsed from the move itself, speeds already in m/h: the Ambit3 driver's own header
+    // parse (raw 10 m/h) only decides which moves to read. Scaling them again for the Ambit3
+    // gave 68.0 km/h for a 7 km/h run (tablet, 31/10).
+    {
+        const ambit_log_header_t &h = entry->header;
+        gpx << "      <energy>"       << h.energy_consumption             << "</energy>\n"
+            << "      <avg_hr>"       << (int)h.heartrate_avg             << "</avg_hr>\n"
+            << "      <max_hr>"       << (int)h.heartrate_max             << "</max_hr>\n"
+            << "      <avg_cadence>"  << (int)h.cadence_avg               << "</avg_cadence>\n"
+            << "      <max_cadence>"  << (int)h.cadence_max               << "</max_cadence>\n"
+            << "      <avg_speed>"    << h.speed_avg                      << "</avg_speed>\n"
+            << "      <max_speed>"    << h.speed_max                      << "</max_speed>\n"
+            << "      <descent>"      << h.descent                        << "</descent>\n"
+            << "      <recovery_time>" << h.recovery_time / 1000          << "</recovery_time>\n"
+            << "      <peak_training_effect>" << (int)h.peak_training_effect << "</peak_training_effect>\n"
+            << "      <max_altitude>" << h.altitude_max                   << "</max_altitude>\n";
+        if (h.swimming_pool_lengths > 0)
+            gpx << "      <pool_lengths>" << h.swimming_pool_lengths << "</pool_lengths>\n";
+    }
+    gpx << "    </extensions>\n"
+        << "  <trkseg>\n";
+
+    // État GPS courant — mis à jour par gps_base, complété par gps_small/tiny/periodic
+    double cur_lat = 0.0, cur_lon = 0.0, cur_ele = 0.0;
+    bool   has_pos = false;
+    uint32_t cur_time_ms = 0;  // temps depuis le début en ms
+
+    // Calculer le timestamp Unix de début (approximatif, seconds depuis epoch)
+    struct tm start_tm = {};
+    start_tm.tm_year  = entry->header.date_time.year  - 1900;
+    start_tm.tm_mon   = entry->header.date_time.month - 1;
+    start_tm.tm_mday  = entry->header.date_time.day;
+    start_tm.tm_hour  = entry->header.date_time.hour;
+    start_tm.tm_min   = entry->header.date_time.minute;
+    start_tm.tm_sec   = (int)(entry->header.date_time.msec / 1000);
+    time_t start_epoch = mktime(&start_tm);
+
+    for (uint32_t i = 0; i < entry->samples_count; i++) {
+        const ambit_log_sample_t &s = entry->samples[i];
+        cur_time_ms = s.time;
+
+        bool emit = false;
+
+        if (s.type == ambit_log_sample_type_gps_base) {
+            cur_lat = s.u.gps_base.latitude  / 1e7;
+            cur_lon = s.u.gps_base.longitude / 1e7;
+            cur_ele = s.u.gps_base.altitude  / 100.0;  // cm → m
+            has_pos = true;
+            emit    = true;
+        }
+        else if (s.type == ambit_log_sample_type_gps_small) {
+            cur_lat = s.u.gps_small.latitude  / 1e7;
+            cur_lon = s.u.gps_small.longitude / 1e7;
+            has_pos = true;
+            emit    = true;
+        }
+        else if (s.type == ambit_log_sample_type_gps_tiny) {
+            cur_lat = s.u.gps_tiny.latitude  / 1e7;
+            cur_lon = s.u.gps_tiny.longitude / 1e7;
+            has_pos = true;
+            emit    = true;
+        }
+        else if (s.type == ambit_log_sample_type_periodic) {
+            // Un sample périodique porteur de lat+lon EST une position — ne pas exiger un
+            // gps_base préalable (l'ancien `&& has_pos`). Le trekking (GPS basse fréquence /
+            // FusedTrack) n'a souvent aucun gps_base et n'enregistre les positions que dans les
+            // samples périodiques : ce garde-fou les jetait toutes → distance mais trace vide
+            // ("no GPS data"). 2026-08-30.
+            double lat = cur_lat, lon = cur_lon;
+            bool lat_ok = false, lon_ok = false;
+            for (uint8_t v = 0; v < s.u.periodic.value_count; v++) {
+                const ambit_log_sample_periodic_value_t &pv = s.u.periodic.values[v];
+                if (pv.type == ambit_log_sample_periodic_type_latitude)  { lat = pv.u.latitude  / 1e7; lat_ok = true; }
+                if (pv.type == ambit_log_sample_periodic_type_longitude) { lon = pv.u.longitude / 1e7; lon_ok = true; }
+                // Ne pas écraser cur_ele avec l'altitude barométrique periodique :
+                // elle diverge souvent de l'altitude GPS (gps_base) et cause des D+ délirants.
+            }
+            if (lat_ok && lon_ok) { cur_lat = lat; cur_lon = lon; has_pos = true; emit = true; }
+        }
+
+        if (emit && has_pos && (cur_lat != 0.0 || cur_lon != 0.0)) {
+            time_t point_epoch = start_epoch + (time_t)(cur_time_ms / 1000);
+            struct tm *ptm = gmtime(&point_epoch);
+            char time_buf[32];
+            strftime(time_buf, sizeof(time_buf), "%Y-%m-%dT%H:%M:%SZ", ptm);
+
+            gpx << std::fixed << std::setprecision(7)
+                << "    <trkpt lat=\"" << cur_lat << "\" lon=\"" << cur_lon << "\">"
+                << "<ele>" << std::setprecision(1) << cur_ele << "</ele>"
+                << "<time>" << time_buf << "</time>"
+                << "</trkpt>\n";
+        }
+    }
+
+    gpx << "  </trkseg></trk>\n</gpx>";
+    return gpx.str();
+}
+
+// ─── Conversion log → FIT (moves GPS-less / indoor uniquement) ─────────────────
+//
+// Twin of the desktop Python encoder (tools/exercise_log.py: _to_fit_no_gps /
+// extract_indoor_records) and of the iOS copy in AmbitBle/AmbitUsbModule.mm — change all
+// three together. Deliberately handles ONLY moves with no GPS track (treadmill, home
+// trainer, gym, pool): those have no track to build the usual FIT from, so today they
+// can't be exported at all. Moves WITH GPS return "" here and keep going through the
+// device-proven TS FitExport (generateFitFile on the GPX) unchanged. The FIT carries every
+// sensor channel the watch recorded this move — heart rate, cadence, speed, power,
+// distance, altitude (barometric on devices that have it), temperature — one record per
+// periodic sample. Units and scalings come straight from libambit.h's periodic-value
+// struct (see ambit_log_sample_periodic_value_s). Logged-Suunto-App developer fields the
+// desktop adds are intentionally NOT ported (mobile never had them).
+
+namespace fitexport {
+
+static const uint32_t GARMIN_EPOCH = 631065600u;  // 1989-12-31T00:00:00Z as Unix time
+static const uint16_t CRC_TABLE[16] = {
+    0x0000,0xCC01,0xD801,0x1400,0xF001,0x3C00,0x2800,0xE401,
+    0xA001,0x6C00,0x7800,0xB401,0x5000,0x9C01,0x8801,0x4400};
+
+static uint16_t crc16(const uint8_t *data, size_t len) {
+    uint16_t crc = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint16_t tmp = CRC_TABLE[crc & 0x0F];
+        crc = ((crc >> 4) ^ tmp ^ CRC_TABLE[data[i] & 0x0F]) & 0xFFFF;
+        tmp = CRC_TABLE[crc & 0x0F];
+        crc = ((crc >> 4) ^ tmp ^ CRC_TABLE[(data[i] >> 4) & 0x0F]) & 0xFFFF;
+    }
+    return crc;
+}
+
+// FIT base-type codes (mirror the Python _E/_S8/_U8/_U16/_U32/_S32).
+enum { FE = 0x00, FS8 = 0x01, FU8 = 0x02, FU16 = 0x84, FU32 = 0x86, FS32 = 0x85 };
+
+struct Buf {
+    std::vector<uint8_t> d;
+    void u8(uint32_t v)  { d.push_back((uint8_t)(v & 0xFF)); }
+    void u16(uint32_t v) { u8(v); u8(v >> 8); }
+    void u32(uint32_t v) { u8(v); u8(v >> 8); u8(v >> 16); u8(v >> 24); }
+    void s8(int v)       { if (v < -128) v = -128; if (v > 127) v = 127; u8((uint8_t)(int8_t)v); }
+    // A definition-message field: number, byte size, base type.
+    struct F { uint8_t num, size, base; };
+    void def(uint8_t local, uint16_t gnum, const std::vector<F> &fields) {
+        u8(0x40 | local); u8(0); u8(0); u16(gnum); u8((uint8_t)fields.size());
+        for (const F &f : fields) { u8(f.num); u8(f.size); u8(f.base); }
+    }
+};
+
+// One decoded sample. A channel is "absent" (never seen yet, or reported its sentinel) as
+// ABSENT; carry-forward keeps the last real value. Raw libambit units.
+static const long ABSENT = LONG_MIN;
+struct Rec {
+    uint32_t t_g;   // timestamp, garmin seconds
+    bool has_pos = false; double lat = 0, lon = 0, ele = 0;   // GPS position (outdoor only)
+    uint32_t ms = 0;   // the sample's own time into the move, ms
+    long hr = ABSENT, cad = ABSENT, spd = ABSENT, pwr = ABSENT,
+         dist = ABSENT, alt = ABSENT, temp = ABSENT;
+};
+
+// Channel accessor by index, matching the CH table below.
+static long chan_val(const Rec &r, int idx) {
+    switch (idx) { case 0: return r.hr; case 1: return r.cad; case 2: return r.dist;
+                   case 3: return r.spd; case 4: return r.pwr; case 5: return r.alt;
+                   default: return r.temp; }
+}
+// Write one channel's value (raw libambit units) as its FIT field, invalid-filled when ABSENT.
+// Scalings mirror the desktop Python _FIT_SENSOR_FIELDS exactly.
+// FIT session/lap `sport` enum from the watch's activity NAME — port of the desktop
+// _to_fit_sport() (tools/exercise_log.py). Keyword-matched on the lowercased name (ASCII lower;
+// UTF-8 accented bytes like "vélo" are matched as-is). 0 = generic. So an uploaded FIT is
+// categorised (Running/Cycling/…) rather than landing as a generic activity on intervals/Garmin.
+static uint8_t to_fit_sport(const char *name) {
+    if (!name) return 0;
+    std::string t;
+    for (const char *p = name; *p; p++) {
+        char c = *p; if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a'); t += c;
+    }
+    auto has = [&](const char *k) { return t.find(k) != std::string::npos; };
+    if (has("run") || has("course") || has("jogging")) return 1;   // running
+    if (has("cycl") || has("vtt") || has("vélo") || has("velo") || has("bike")) return 2;  // cycling
+    if (has("alpin")) return 13;                                   // alpine skiing
+    if (has("fond") || has("nordic") || has("cross")) return 12;   // cross-country skiing
+    if (has("randon") || has("hik")) return 17;                    // hiking
+    if (has("walk") || has("march")) return 11;                    // walking
+    return 0;
+}
+
+// Suunto activity id (the header's activity_type byte = the sport mode's id from
+// assets/activity_types.json - 17 = Indoor cycling, 93 = Treadmill, ...) -> FIT sport, filling
+// *sub_sport. Most watch moves have an empty activity_name and only this id, so without a mapping
+// they land as FIT "generic", which intervals.icu files as *strength training* (forum report: an
+// Ambit2 indoor ride showed up as strength). Real ids + a sub_sport make an indoor ride upload as
+// a Virtual Ride. Twin of the desktop _SUUNTO_ID_TO_FIT. Unlisted ids -> generic (0,0).
+static uint8_t suunto_id_to_fit_sport(uint8_t id, uint8_t *sub_sport) {
+    // FIT sub_sport codes: 1 treadmill, 3 trail, 6 indoor_cycling, 8 mountain, 14 indoor_rowing,
+    // 15 elliptical, 17 lap_swimming, 18 open_water, 20 strength, 21 flexibility, 26 cardio,
+    // 58 virtual_activity.
+    uint8_t ss = 0, sp = 0;
+    switch (id) {
+        case 3:  sp = 1;  break;            // Running
+        case 82: sp = 1;  ss = 3;  break;   // Trail running
+        case 93: sp = 1;  ss = 1;  break;   // Treadmill
+        case 84: sp = 11; break;            // Nordic walking
+        case 4:  sp = 2;  break;            // Cycling
+        case 5:  sp = 2;  ss = 8;  break;   // Mountain biking
+        case 17: sp = 2;  ss = 58; break;   // Indoor cycling -> Virtual Ride
+        case 6:  sp = 5;  ss = 17; break;   // Pool swimming
+        case 83: sp = 5;  ss = 18; break;   // Open-water swimming
+        case 11: sp = 17; break;            // Trekking -> hiking
+        case 12: sp = 11; break;            // Walking
+        case 85: sp = 11; break;            // Snowshoeing
+        case 20: case 80: sp = 13; break;   // Alpine skiing / Telemark
+        case 21: sp = 14; break;            // Snowboarding
+        case 22: case 78: sp = 12; break;   // Cross-country skiing / Ski touring
+        case 15: sp = 15; break;            // Rowing
+        case 71: sp = 15; ss = 14; break;   // Indoor rowing
+        case 14: case 72: case 89: sp = 19; break;  // Kayak / Canoe / SUP
+        case 16: case 74: sp = 16; break;   // Climbing / Mountaineering
+        case 23: case 87: case 90: sp = 4; ss = 20; break;  // Weights / Kettlebell / Crossfit
+        case 18: case 9: sp = 4; ss = 26; break;            // Circuit / Aerobics
+        case 64: sp = 4; ss = 15; break;    // Crosstrainer
+        case 10: case 79: sp = 4; ss = 21; break;           // Yoga/Pilates / Stretching
+        case 95: sp = 4; break;             // Indoor training
+        default: sp = 0; break;             // generic
+    }
+    if (sub_sport) *sub_sport = ss;
+    return sp;
+}
+
+static void chan_write(Buf &b, int idx, long v) {
+    switch (idx) {
+        case 0: /* hr  bpm */ b.u8(v == ABSENT ? 0xFF : (v < 0 ? 0 : (v > 0xFE ? 0xFE : v))); break;
+        case 1: /* cad rpm */ b.u8(v == ABSENT ? 0xFF : (v < 0 ? 0 : (v > 0xFE ? 0xFE : v))); break;
+        case 2: /* dist m→cm (×100) */ b.u32(v == ABSENT ? 0xFFFFFFFFu : (uint32_t)(v < 0 ? 0 : v * 100)); break;
+        case 3: /* speed raw m/s×100 → mm/s (×10) */ {
+            if (v == ABSENT) { b.u16(0xFFFF); break; }
+            long o = v * 10; if (o < 0) o = 0; if (o > 0xFFFE) o = 0xFFFE; b.u16(o); break; }
+        case 4: /* power watts */ b.u16(v == ABSENT ? 0xFFFF : (v < 0 ? 0 : (v > 0xFFFE ? 0xFFFE : v))); break;
+        case 5: /* altitude m → (m+500)×5 */ {
+            if (v == ABSENT) { b.u16(0xFFFF); break; }
+            long o = (v + 500) * 5; if (o < 0) o = 0; if (o > 0xFFFE) o = 0xFFFE; b.u16(o); break; }
+        default: /* temperature raw C×10 → C */
+            b.s8(v == ABSENT ? 0x7F : (int)((v < 0 ? v - 5 : v + 5) / 10)); break;
+    }
+}
+
+// Returns raw FIT bytes for a move (outdoor OR indoor), or an empty vector if it carries no
+// usable samples at all. Twin of the desktop Python to_fit / _to_fit_no_gps.
+static std::vector<uint8_t> build(const ambit_log_entry_t *entry) {
+    const ambit_log_header_t &h = entry->header;
+
+    // Start epoch — same construction as convertEntryToGpx (header local time via mktime), so
+    // FIT and GPX timestamps line up for a given move.
+    struct tm start_tm = {};
+    start_tm.tm_year = h.date_time.year  - 1900;
+    start_tm.tm_mon  = h.date_time.month - 1;
+    start_tm.tm_mday = h.date_time.day;
+    start_tm.tm_hour = h.date_time.hour;
+    start_tm.tm_min  = h.date_time.minute;
+    start_tm.tm_sec  = (int)(h.date_time.msec / 1000);
+    time_t start_epoch = mktime(&start_tm);
+
+    // Pass 1: does this move have GPS at all? (any gps_* sample, or a periodic sample carrying
+    // both lat and lon). Mirrors extract_track_points()'s emit condition.
+    bool has_gps = false;
+    for (uint32_t i = 0; i < entry->samples_count && !has_gps; i++) {
+        const ambit_log_sample_t &s = entry->samples[i];
+        if (s.type == ambit_log_sample_type_gps_base ||
+            s.type == ambit_log_sample_type_gps_small ||
+            s.type == ambit_log_sample_type_gps_tiny) { has_gps = true; break; }
+        if (s.type == ambit_log_sample_type_periodic) {
+            bool lat_ok = false, lon_ok = false;
+            for (uint8_t v = 0; v < s.u.periodic.value_count; v++) {
+                uint32_t t = s.u.periodic.values[v].type;
+                if (t == ambit_log_sample_periodic_type_latitude)  lat_ok = true;
+                if (t == ambit_log_sample_periodic_type_longitude) lon_ok = true;
+            }
+            if (lat_ok && lon_ok) has_gps = true;
+        }
+    }
+
+    // Pass 2: walk, carrying forward position (outdoor) and every sensor channel. For an outdoor
+    // move emit a record at each GPS position (same points as the GPX track, now enriched with
+    // sensors); for an indoor move emit one record per periodic sample (no position).
+    std::vector<Rec> recs;
+    double cur_lat = 0, cur_lon = 0, cur_ele = 0; bool has_pos = false;
+    long cur_hr = ABSENT, cur_cad = ABSENT, cur_spd = ABSENT, cur_pwr = ABSENT,
+         cur_dist = ABSENT, cur_alt = ABSENT, cur_temp = ABSENT;
+    bool saw_pod_cadence = false;
+
+    for (uint32_t i = 0; i < entry->samples_count; i++) {
+        const ambit_log_sample_t &s = entry->samples[i];
+        bool emit = false;
+
+        if (s.type == ambit_log_sample_type_periodic) {
+            double lat = cur_lat, lon = cur_lon; bool lat_ok = false, lon_ok = false;
+            for (uint8_t v = 0; v < s.u.periodic.value_count; v++) {
+                const ambit_log_sample_periodic_value_t &pv = s.u.periodic.values[v];
+                switch (pv.type) {
+                    case ambit_log_sample_periodic_type_latitude:  lat = pv.u.latitude  / 1e7; lat_ok = true; break;
+                    case ambit_log_sample_periodic_type_longitude: lon = pv.u.longitude / 1e7; lon_ok = true; break;
+                    case ambit_log_sample_periodic_type_hr:
+                        if (pv.u.hr != 0xFF) cur_hr = pv.u.hr; break;
+                    case ambit_log_sample_periodic_type_cadence:
+                        if (pv.u.cadence != 0xFF) { cur_cad = pv.u.cadence; saw_pod_cadence = true; } break;
+                    case ambit_log_sample_periodic_type_wristcadence:
+                        if (pv.u.wristcadence != 0xFFFF && !saw_pod_cadence) cur_cad = pv.u.wristcadence; break;
+                    case ambit_log_sample_periodic_type_speed:
+                        if (pv.u.speed != 0xFFFF) cur_spd = pv.u.speed; break;
+                    case ambit_log_sample_periodic_type_bikepower:
+                        if (pv.u.bikepower != 0xFFFF) cur_pwr = pv.u.bikepower; break;
+                    case ambit_log_sample_periodic_type_distance:
+                        cur_dist = pv.u.distance; break;
+                    case ambit_log_sample_periodic_type_altitude:
+                        cur_alt = pv.u.altitude; break;
+                    case ambit_log_sample_periodic_type_temperature:
+                        cur_temp = pv.u.temperature; break;
+                    default: break;
+                }
+            }
+            if (lat_ok && lon_ok) { cur_lat = lat; cur_lon = lon; has_pos = true; }
+            // Outdoor: emit only at positions (matches the GPX track). Indoor: emit every sample.
+            if (has_gps) emit = (lat_ok && lon_ok && (cur_lat != 0.0 || cur_lon != 0.0));
+            else         emit = true;
+        }
+        else if (s.type == ambit_log_sample_type_gps_base) {
+            cur_lat = s.u.gps_base.latitude / 1e7; cur_lon = s.u.gps_base.longitude / 1e7;
+            cur_ele = s.u.gps_base.altitude / 100.0; has_pos = true;
+            emit = (cur_lat != 0.0 || cur_lon != 0.0);
+        }
+        else if (s.type == ambit_log_sample_type_gps_small) {
+            cur_lat = s.u.gps_small.latitude / 1e7; cur_lon = s.u.gps_small.longitude / 1e7;
+            has_pos = true; emit = (cur_lat != 0.0 || cur_lon != 0.0);
+        }
+        else if (s.type == ambit_log_sample_type_gps_tiny) {
+            cur_lat = s.u.gps_tiny.latitude / 1e7; cur_lon = s.u.gps_tiny.longitude / 1e7;
+            has_pos = true; emit = (cur_lat != 0.0 || cur_lon != 0.0);
+        }
+
+        if (emit) {
+            Rec r;
+            r.t_g = (uint32_t)((long)start_epoch + (long)(s.time / 1000) - (long)GARMIN_EPOCH);
+            if (has_gps) { r.has_pos = has_pos; r.lat = cur_lat; r.lon = cur_lon; r.ele = cur_ele; }
+            r.ms = s.time;
+            r.hr = cur_hr; r.cad = cur_cad; r.spd = cur_spd; r.pwr = cur_pwr;
+            r.dist = cur_dist; r.alt = cur_alt; r.temp = cur_temp;
+            recs.push_back(r);
+        }
+    }
+    if (recs.empty()) return {};
+
+    // No live heart rate at all on a move without GPS (a pool swim): take it from the belt's
+    // stored beats. In the water the belt's radio does not reach the watch, so a Smart Sensor
+    // keeps every beat and hands them over at the end as ibi samples; their running sum is the
+    // move's own clock, pauses included (the belt writes a pause as gap records). Twin of the
+    // desktop heart_rate_from_ibi (tools/exercise_log.py): beats of 300-2000 ms count, and the
+    // heart rate at a sample is that of the beats in the 5 s before it.
+    if (!has_gps) {
+        bool live_hr = false;
+        for (const Rec &r : recs) if (r.hr != ABSENT) { live_hr = true; break; }
+        std::vector<double> beat_t; std::vector<uint32_t> beat_v;
+        if (!live_hr) {
+            double t = 0;
+            for (uint32_t i = 0; i < entry->samples_count; i++) {
+                const ambit_log_sample_t &s = entry->samples[i];
+                if (s.type != ambit_log_sample_type_ibi) continue;
+                for (uint8_t k = 0; k < s.u.ibi.ibi_count; k++) {
+                    uint16_t v = s.u.ibi.ibi[k];
+                    t += v;
+                    if (v >= 300 && v <= 2000) { beat_t.push_back(t); beat_v.push_back(v); }
+                }
+            }
+        }
+        if (!beat_t.empty()) {
+            for (Rec &r : recs) {
+                size_t hi = std::upper_bound(beat_t.begin(), beat_t.end(), (double)r.ms) - beat_t.begin();
+                size_t lo = std::lower_bound(beat_t.begin(), beat_t.end(), (double)r.ms - 5000.0) - beat_t.begin();
+                if (hi < lo + 2) continue;
+                double sum = 0;
+                for (size_t k = lo; k < hi; k++) sum += beat_v[k];
+                r.hr = lround(60000.0 * (double)(hi - lo) / sum);
+            }
+        }
+    }
+
+    // Which sensor channels this move actually carried (present in >=1 record). Field number,
+    // byte size, base type per the standard FIT record profile. An outdoor move takes position/
+    // altitude/distance from the GPS track, so only the non-positional subset comes from sensors
+    // (HR/cadence/speed/power/temperature — indices 0,1,3,4,6); an indoor move uses all of them
+    // (0,1,2,3,4,5,6). Order fixes the record layout.
+    struct Chan { int idx; uint8_t num, size, base; };
+    static const Chan CH[] = {
+        {0, 3,  1, FU8 }, {1, 4,  1, FU8 }, {2, 5,  4, FU32}, {3, 6,  2, FU16},
+        {4, 7,  2, FU16}, {5, 2,  2, FU16}, {6, 13, 1, FS8 },
+    };
+    const int GPS_ORDER[]    = {0, 1, 3, 4, 6};              // hr, cad, speed, power, temp
+    const int INDOOR_ORDER[] = {0, 1, 2, 3, 4, 5, 6};        // + distance, altitude
+    std::vector<Chan> present;
+    const int *order = has_gps ? GPS_ORDER : INDOOR_ORDER;
+    size_t order_n   = has_gps ? 5 : 7;
+    for (size_t k = 0; k < order_n; k++) {
+        const Chan &c = CH[order[k]];
+        for (const Rec &r : recs) { if (chan_val(r, c.idx) != ABSENT) { present.push_back(c); break; } }
+    }
+
+    uint32_t start_g = recs.front().t_g;
+    uint32_t end_g   = recs.back().t_g;
+    uint32_t dur_ms  = h.duration;
+    uint32_t dist_cm = (uint32_t)((double)h.distance * 100.0);
+    uint8_t  sub_sport = 0;
+    uint8_t  sport   = to_fit_sport(h.activity_name);   // categorise the uploaded FIT
+    if (sport == 0) sport = suunto_id_to_fit_sport(h.activity_type, &sub_sport);  // fall back to the id
+
+    Buf b;
+    // file_id (local 0, global 0)
+    b.def(0, 0, {{0,1,FE},{1,2,FU16},{2,2,FU16},{4,4,FU32}});
+    b.u8(0); b.u8(4); b.u16(255); b.u16(0); b.u32(start_g);
+    // activity (local 1, global 34)
+    b.def(1, 34, {{253,4,FU32},{1,2,FU16},{2,1,FE},{3,1,FE},{4,1,FE}});
+    b.u8(1); b.u32(end_g); b.u16(1); b.u8(0); b.u8(26); b.u8(1);
+    // Pool swims: the lengths from the watch's swimming_turn samples (twin of the desktop
+    // extract_pool_lengths). Each turn that raises the running count closes one length and
+    // carries its exact swim time (0.1 s) and strokes; the record is written a few seconds after
+    // the turn, so starts are chained - a length starts where the previous one ended, or at
+    // (record time - swim time) when later, the gap being a rest at the wall.
+    struct Len { double start; double swim; uint16_t strokes; uint8_t style; };
+    std::vector<Len> lens;
+    {
+        uint16_t seen = 0; double prev_end = -1;
+        bool sane = true;
+        // By length count, not by position in the log: the watch can write a length's record
+        // ahead of the one before it (26, 28, 27, 29 on a real swim, 2026-10-04), and walking
+        // them in log order dropped a length.
+        std::vector<const ambit_log_sample_t *> turns;
+        for (uint32_t i = 0; i < entry->samples_count; i++)
+            if (entry->samples[i].type == ambit_log_sample_type_swimming_turn) turns.push_back(&entry->samples[i]);
+        std::stable_sort(turns.begin(), turns.end(), [](const ambit_log_sample_t *a, const ambit_log_sample_t *b) {
+            return a->u.swimming_turn.lengths < b->u.swimming_turn.lengths; });
+        for (const ambit_log_sample_t *turn : turns) {
+            const ambit_log_sample_t &s = *turn;
+            if (s.u.swimming_turn.lengths <= seen || s.u.swimming_turn.duration == 0) continue;
+            seen = s.u.swimming_turn.lengths;
+            double swim = s.u.swimming_turn.duration / 10.0;
+            if (swim > 1800) sane = false;       // not this layout on this model: write none
+            double t  = (double)start_epoch + s.time / 1000.0;
+            double st = t - swim;
+            if (prev_end >= 0 && st < prev_end) st = prev_end;
+            lens.push_back({st, swim, s.u.swimming_turn.strokes, s.u.swimming_turn.style});
+            prev_end = st + swim;
+        }
+        if (!sane) lens.clear();
+    }
+    bool pool = !lens.empty() && h.swimming_pool_length > 0;
+
+    // session (local 2, global 18)
+    std::vector<Buf::F> sfields = {{254,2,FU16},{253,4,FU32},{2,4,FU32},{7,4,FU32},{8,4,FU32},
+                  {9,4,FU32},{22,2,FU16},{23,2,FU16},{5,1,FE},{6,1,FE},{0,1,FE},{1,1,FE}};
+    sfields.push_back({16,1,FU8}); sfields.push_back({17,1,FU8});   // avg / max heart rate, the watch's own
+    if (pool) { sfields.push_back({44,2,FU16}); sfields.push_back({46,1,FE}); sfields.push_back({33,2,FU16}); }
+    b.def(2, 18, sfields);
+    b.u8(2); b.u16(0); b.u32(end_g); b.u32(start_g); b.u32(dur_ms); b.u32(dur_ms);
+    b.u32(dist_cm); b.u16(h.ascent); b.u16(h.descent); b.u8(sport); b.u8(sub_sport); b.u8(8); b.u8(1);
+    b.u8(h.heartrate_avg ? h.heartrate_avg : 0xFF); b.u8(h.heartrate_max ? h.heartrate_max : 0xFF);
+    if (pool) { b.u16(h.swimming_pool_length * 100); b.u8(0); b.u16((uint32_t)lens.size()); }
+    // lap (local 3, global 19)
+    b.def(3, 19, {{254,2,FU16},{253,4,FU32},{2,4,FU32},{7,4,FU32},{9,4,FU32},{0,1,FE},{1,1,FE}});
+    b.u8(3); b.u16(0); b.u32(end_g); b.u32(start_g); b.u32(dur_ms); b.u32(dist_cm); b.u8(9); b.u8(1);
+
+    // length (local 7, global 101), the Garmin way: an ACTIVE length per length swum and an IDLE
+    // length for each rest at the wall between two of them. Ambit style -> FIT swim_stroke
+    // (0 Other has none: invalid).
+    if (!lens.empty()) {
+        b.def(7, 101, {{254,2,FU16},{253,4,FU32},{2,4,FU32},{3,4,FU32},{4,4,FU32},
+                       {5,2,FU16},{0,1,FE},{1,1,FE},{7,1,FE},{12,1,FE}});
+        static const uint8_t STROKE[6] = {0xFF, 3, 1, 2, 0, 4};  // other, fly, back, breast, free, drill
+        uint16_t idx = 0;
+        auto one = [&](double st, double secs, uint32_t strokes, uint8_t stroke, bool active) {
+            uint32_t st_g = (uint32_t)((long)st - (long)GARMIN_EPOCH);
+            b.u8(7); b.u16(idx++);
+            b.u32(st_g + (uint32_t)llround(secs)); b.u32(st_g);
+            b.u32((uint32_t)llround(secs * 1000)); b.u32((uint32_t)llround(secs * 1000));
+            b.u16(strokes); b.u8(28); b.u8(1); b.u8(stroke); b.u8(active ? 1 : 0);
+        };
+        for (size_t k = 0; k < lens.size(); k++) {
+            if (k) {
+                const Len &p = lens[k - 1];
+                double rest = lens[k].start - p.start - p.swim;
+                if (rest >= 1) one(p.start + p.swim, rest, 0xFFFF, 0xFF, false);
+            }
+            const Len &l = lens[k];
+            one(l.start, l.swim, l.strokes, l.style < 6 ? STROKE[l.style] : 0xFF, true);
+        }
+    }
+
+    // Guided-workout steps (twin of the desktop _write_workout_steps): the watch logs an episodic
+    // 0x1e record each time a native workout enters a step - libambit keeps it as an unknown
+    // sample: [type 3][u32 time][0x1e][f32 target min][f32 target max][f32 end value][u16]
+    // [u16 step: 1 interval, 3 rest, 7 workout finished][u16][u16 ends on: 0x0a distance,
+    // 0x0b time, 0x19 lap]. Written as a FIT workout_step (global 27) plus a workout_step start
+    // event (global 21) at the moment it was entered; "finished" becomes a workout stop event.
+    {
+        bool defs = false; uint16_t idx = 0;
+        for (uint32_t i = 0; i < entry->samples_count; i++) {
+            const ambit_log_sample_t &s = entry->samples[i];
+            if (s.type != ambit_log_sample_type_unknown || !s.u.unknown.data || s.u.unknown.datalen < 26) continue;
+            const uint8_t *d = s.u.unknown.data;
+            if (d[0] != 3 || d[5] != 0x1e) continue;
+            float end_value; memcpy(&end_value, d + 14, 4);
+            uint16_t step = (uint16_t)(d[20] | (d[21] << 8)), ends = (uint16_t)(d[24] | (d[25] << 8));
+            uint32_t t_g = (uint32_t)((long)start_epoch + (long)(s.time / 1000) - (long)GARMIN_EPOCH);
+            if (!defs) {
+                b.def(8, 27, {{254,2,FU16},{1,1,FE},{2,4,FU32},{7,1,FE}});
+                b.def(9, 21, {{253,4,FU32},{0,1,FE},{1,1,FE},{3,4,FU32}});
+                defs = true;
+            }
+            if (step == 7) { b.u8(9); b.u32(t_g); b.u8(3); b.u8(1); b.u32(0); continue; }
+            uint8_t dur_type = ends == 0x0a ? 1 : ends == 0x0b ? 0 : ends == 0x19 ? 5 : 0xFF;
+            double scale = ends == 0x0a ? 100.0 : ends == 0x0b ? 1000.0 : 0.0;
+            b.u8(8); b.u16(idx); b.u8(dur_type);
+            b.u32(scale > 0 ? (uint32_t)llround(end_value * scale) : 0xFFFFFFFFu);
+            b.u8(step == 1 ? 0 : step == 3 ? 1 : 0xFF);
+            b.u8(9); b.u32(t_g); b.u8(4); b.u8(0); b.u32(idx);
+            idx++;
+        }
+    }
+
+    // record (local 4, global 20): timestamp, then (outdoor) lat/lon/altitude/distance, then the
+    // present sensor channels.
+    std::vector<Buf::F> rfields;
+    rfields.push_back({253,4,FU32});
+    if (has_gps) { rfields.push_back({0,4,FS32}); rfields.push_back({1,4,FS32});
+                   rfields.push_back({2,2,FU16}); rfields.push_back({5,4,FU32}); }
+    for (const Chan &c : present) rfields.push_back({c.num, c.size, c.base});
+    b.def(4, 20, rfields);
+
+    const double SEMI = 2147483648.0 / 180.0;   // 2^31 / 180, degrees → semicircles
+    double cum_dist = 0.0;
+    for (size_t i = 0; i < recs.size(); i++) {
+        const Rec &r = recs[i];
+        b.u8(4);
+        b.u32(r.t_g);
+        if (has_gps) {
+            long lat = (long)llround(r.lat * SEMI);
+            long lon = (long)llround(r.lon * SEMI);
+            long alt = (long)llround((r.ele + 500) * 5); if (alt < 0) alt = 0;
+            b.u32((uint32_t)(int32_t)lat);
+            b.u32((uint32_t)(int32_t)lon);
+            b.u16(alt);
+            if (i > 0) {
+                const Rec &q = recs[i - 1];
+                double dy = (r.lat - q.lat) * 111320.0;
+                double dx = (r.lon - q.lon) * 111320.0 * cos(r.lat * M_PI / 180.0);
+                cum_dist += sqrt(dy * dy + dx * dx);
+            }
+            b.u32((uint32_t)llround(cum_dist * 100.0));
+        }
+        for (const Chan &c : present) chan_write(b, c.idx, chan_val(r, c.idx));
+    }
+
+    // 14-byte header + data + file CRC.
+    std::vector<uint8_t> out;
+    out.push_back(14); out.push_back(0x10);
+    out.push_back(0x34); out.push_back(0x08);          // profile version 2100, little-endian
+    uint32_t dl = (uint32_t)b.d.size();
+    out.push_back(dl & 0xFF); out.push_back((dl >> 8) & 0xFF);
+    out.push_back((dl >> 16) & 0xFF); out.push_back((dl >> 24) & 0xFF);
+    out.push_back('.'); out.push_back('F'); out.push_back('I'); out.push_back('T');
+    uint16_t hcrc = crc16(out.data(), out.size());
+    out.push_back(hcrc & 0xFF); out.push_back((hcrc >> 8) & 0xFF);
+    out.insert(out.end(), b.d.begin(), b.d.end());
+    uint16_t fcrc = crc16(b.d.data(), b.d.size());
+    out.push_back(fcrc & 0xFF); out.push_back((fcrc >> 8) & 0xFF);
+    return out;
+}
+
+}  // namespace fitexport
+
+// ─── Callback libambit_log_read ────────────────────────────────────────────────
+
+static void log_push_callback(void *userdata, ambit_log_entry_t *log_entry)
+{
+    (void)userdata;
+    std::string gpx = convertEntryToGpx(log_entry);
+    g_log_cache.push_back(gpx);
+    g_log_dates.push_back(log_entry->header.date_time);   // for mark-synced (same index)
+    // Native FIT for this move — outdoor (GPS track + sensor channels) and indoor (sensor
+    // channels only) alike, so every move exports to FIT with HR/cadence/power/etc, not just
+    // the track. "" only if the move had no usable samples. Same index as g_log_cache.
+    // Best-effort: a FIT build failure must never break the GPX sync the user asked for.
+    std::vector<uint8_t> fit = fitexport::build(log_entry);
+    g_log_fit_b64.push_back(fit.empty() ? std::string()
+                                        : base64Encode(fit.data(), fit.size()));
+    LOGI("log_push_callback: log #%zu ajouté (%zu bytes gpx, %zu bytes fit)",
+         g_log_cache.size(), gpx.size(), fit.size());
+    // Ne pas libérer ici : device_driver_ambit.c appelle libambit_log_entry_free après push_cb
+}
+
+static int log_skip_callback(void *userdata, ambit_log_header_t *log_header)
+{
+    (void)userdata;
+    if (g_known_dates.empty()) return 1;  // rien à skipper
+    std::string id = formatLogId(log_header);
+    int skip = g_known_dates.count(id) ? 0 : 1;
+    if (skip == 0) LOGI("log_skip_callback: skip %s (déjà synchro)", id.c_str());
+    return skip;  // 0 = skipper, 1 = lire
+}
+
+// ─── JNI ──────────────────────────────────────────────────────────────────────
+
+extern "C" {
+
+/**
+ * nativeAmbitInit
+ *
+ * @param fd     FileDescriptor de la connexion USB Android
+ * @param epIn   Adresse endpoint interrupt IN  (ex: 0x81)
+ * @param epOut  Adresse endpoint interrupt OUT (ex: 0x01), ou -1
+ * @param vid    Vendor ID Suunto (0x1493)
+ * @param pid    Product ID Suunto (0x001C Ambit3 Sport, 0x0010 Ambit 1…)
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitInit(
+        JNIEnv * /* env */, jobject /* thiz */,
+        jint fd, jint epIn, jint epOut, jint vid, jint pid)
+{
+    LOGI("nativeAmbitInit fd=%d epIn=0x%02x epOut=0x%02x vid=0x%04x pid=0x%04x",
+         fd, epIn, epOut, vid, pid);
+
+    // Fermer un éventuel device précédent
+    if (g_device) {
+        libambit_close(g_device);
+        g_device = nullptr;
+    }
+    g_log_cache.clear();
+    g_log_fit_b64.clear();
+    g_log_dates.clear();
+
+    g_device = libambit_new_from_fd(fd, epIn, epOut,
+                                    (uint16_t)vid, (uint16_t)pid);
+    if (!g_device) {
+        LOGE("libambit_new_from_fd failed : VID/PID 0x%04x/0x%04x non supporté", vid, pid);
+        return JNI_FALSE;
+    }
+
+    LOGI("Ambit initialisé avec succès (driver sélectionné)");
+    return JNI_TRUE;
+}
+
+/**
+ * nativeAmbitGetDeviceInfo
+ *
+ * Returns a JSON string: {"model":"...","serial":"...","fwVersion":"X.Y.Z",
+ * "hwVersion":"X.Y.Z","battery":N}.
+ *
+ * model/serial/fwVersion/hwVersion come from device_info, already populated
+ * once at connect time for both USB and BLE (see libambit_android.c) — no
+ * extra round-trip to the watch needed here. The third version component is
+ * a 16-bit little-endian value (version[2] | version[3]<<8), not a plain
+ * byte — confirmed against a hardware-verified reference implementation
+ * (device_info.py in the companion desktop project), matching the formatting
+ * version_string() in libambit.c already uses.
+ *
+ * battery is a live read (ambit_command_status / 0x0306, charge = reply
+ * byte[1]) since it changes over time and isn't cached in device_info.
+ * -1 if the read fails — non-fatal, caller should just hide the battery row.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitGetDeviceInfo(
+        JNIEnv *env, jobject /* thiz */)
+{
+    if (!g_device) { LOGE("Not initialized"); return env->NewStringUTF("{}"); }
+
+    const uint8_t *fw = g_device->device_info.fw_version;
+    const uint8_t *hw = g_device->device_info.hw_version;
+    char fw_buf[16];
+    char hw_buf[16];
+    snprintf(fw_buf, sizeof(fw_buf), "%d.%d.%d", fw[0], fw[1], fw[2] | (fw[3] << 8));
+    snprintf(hw_buf, sizeof(hw_buf), "%d.%d.%d", hw[0], hw[1], hw[2] | (hw[3] << 8));
+
+    ambit_device_status_t status;
+    int battery = -1;
+    if (libambit_device_status_get(g_device, &status) == 0) {
+        battery = status.charge;
+    } else {
+        LOGE("Failed to read battery status");
+    }
+
+    std::ostringstream json;
+    json << "{"
+         << "\"model\":\""      << jsonEscape(g_device->device_info.model)  << "\","
+         << "\"serial\":\""     << jsonEscape(g_device->device_info.serial) << "\","
+         << "\"fwVersion\":\""  << fw_buf << "\","
+         << "\"hwVersion\":\""  << hw_buf << "\","
+         << "\"battery\":"      << battery
+         << "}";
+
+    return env->NewStringUTF(json.str().c_str());
+}
+
+/**
+ * nativeAmbitGetLogCount
+ *
+ * Lit TOUS les logs depuis la montre et les met en cache (g_log_cache).
+ * Retourne le nombre de logs lus, ou -1 en cas d'erreur.
+ * Opération synchrone longue — appelée depuis un thread background Kotlin.
+ */
+JNIEXPORT jint JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitGetLogCount(
+        JNIEnv *env, jobject /* thiz */, jobjectArray knownDates)
+{
+    if (!g_device) { LOGE("Not initialized"); return -1; }
+
+    // Charger les IDs déjà connus pour le skip_callback
+    g_known_dates.clear();
+    if (knownDates) {
+        jsize n = env->GetArrayLength(knownDates);
+        for (jsize i = 0; i < n; i++) {
+            auto jstr = (jstring)env->GetObjectArrayElement(knownDates, i);
+            const char *s = env->GetStringUTFChars(jstr, nullptr);
+            g_known_dates.insert(s);
+            env->ReleaseStringUTFChars(jstr, s);
+            env->DeleteLocalRef(jstr);
+        }
+        LOGI("nativeAmbitGetLogCount: %zu IDs connus (skip activé)", g_known_dates.size());
+    }
+
+    g_log_cache.clear();
+    g_log_fit_b64.clear();
+    g_log_dates.clear();
+    int ret = libambit_log_read(g_device,
+                                log_skip_callback,
+                                log_push_callback,
+                                nullptr,   // progress_callback
+                                nullptr);  // userdata
+    if (ret < 0) {
+        LOGE("libambit_log_read failed: %d", ret);
+        return -1;
+    }
+    LOGI("nativeAmbitGetLogCount: %zu logs lus", g_log_cache.size());
+    return (jint)g_log_cache.size();
+}
+
+/**
+ * nativeAmbitGetLogAsGpx
+ *
+ * Retourne le GPX du log à l'index donné depuis le cache g_log_cache.
+ * Doit être appelé après nativeAmbitGetLogCount.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitGetLogAsGpx(
+        JNIEnv *env, jobject /* thiz */, jint index)
+{
+    if ((size_t)index >= g_log_cache.size()) {
+        LOGE("nativeAmbitGetLogAsGpx: index %d hors limites (cache=%zu)",
+             index, g_log_cache.size());
+        return nullptr;
+    }
+    return env->NewStringUTF(g_log_cache[(size_t)index].c_str());
+}
+
+/**
+ * nativeAmbitGetLogAsFit
+ *
+ * Returns the base64-encoded native FIT of the log at `index` from g_log_fit_b64 (same index
+ * as nativeAmbitGetLogAsGpx). Empty string when this move produced no FIT (no usable samples);
+ * null when the index is out of range. Must be called after nativeAmbitGetLogCount.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitGetLogAsFit(
+        JNIEnv *env, jobject /* thiz */, jint index)
+{
+    // getLogFits() reads until it gets null, so one past the end is how every sync stops - not an
+    // error. It used to log "hors limites" at error level on each sync (tablet, 2026-10-23).
+    if (index >= 0 && (size_t)index == g_log_fit_b64.size())
+        return nullptr;
+    if (index < 0 || (size_t)index > g_log_fit_b64.size()) {
+        LOGE("nativeAmbitGetLogAsFit: index %d hors limites (cache=%zu)",
+             index, g_log_fit_b64.size());
+        return nullptr;
+    }
+    return env->NewStringUTF(g_log_fit_b64[(size_t)index].c_str());
+}
+
+/**
+ * nativeAmbitMarkReadLogsSynced
+ *
+ * Tells the watch that every move read this session (all of g_log_dates, filled by
+ * nativeAmbitGetLogCount - the moves the watch actually sent, NOT the possibly-shorter GPX
+ * array) is synced - the per-move flag SuuntoLink writes over cable so the Suunto app /
+ * SuuntoLink don't duplicate it. Opt-in, experimental (Settings), OFF by default; the TS
+ * layer decides whether the device SUPPORTS it (only Ambit3 GEN4 fw has a known log_synced
+ * entry id, mirroring the desktop mark_synced.py guard) and only calls this for supported
+ * watches. Driving the loop off g_log_dates here, rather than a caller-supplied index/count,
+ * keeps marking tied to exactly the moves that were read - no dependence on the GPX list
+ * length. libambit_log_synced reads only header.date_time, so a minimal stack entry with just
+ * that field is enough. Best-effort: one failed move doesn't abort the rest. Returns the
+ * number of moves marked, or -1 if not initialized. Nothing is deleted - the watch still
+ * reclaims log space by wraparound.
+ */
+JNIEXPORT jint JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitMarkReadLogsSynced(
+        JNIEnv * /* env */, jobject /* thiz */)
+{
+    if (!g_device) { LOGE("nativeAmbitMarkReadLogsSynced: not initialized"); return -1; }
+    int marked = 0;
+    for (size_t i = 0; i < g_log_dates.size(); i++) {
+        ambit_log_entry_t entry;
+        memset(&entry, 0, sizeof(entry));
+        entry.header.date_time = g_log_dates[i];
+        int r = libambit_log_synced(g_device, &entry);
+        if (r != 0) {
+            LOGE("nativeAmbitMarkReadLogsSynced: libambit_log_synced returned %d (move %zu)", r, i);
+            continue;
+        }
+        marked++;
+    }
+    LOGI("nativeAmbitMarkReadLogsSynced: %d/%zu move(s) marked synced on watch",
+         marked, g_log_dates.size());
+    return marked;
+}
+
+/**
+ * nativeAmbitSendSgee
+ *
+ * Envoie les éphémérides GPS à la montre via libambit_gps_orbit_write.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitSendSgee(
+        JNIEnv *env, jobject /* thiz */, jbyteArray data)
+{
+    if (!g_device) { LOGE("Not initialized"); return JNI_FALSE; }
+
+    jsize len   = env->GetArrayLength(data);
+    jbyte *bytes = env->GetByteArrayElements(data, nullptr);
+    LOGI("nativeAmbitSendSgee: %d bytes", (int)len);
+
+    int ret = libambit_gps_orbit_write(g_device, (uint8_t *)bytes, (size_t)len);
+    env->ReleaseByteArrayElements(data, bytes, JNI_ABORT);
+
+    if (ret != 0) { LOGE("libambit_gps_orbit_write failed: %d", ret); return JNI_FALSE; }
+    return JNI_TRUE;
+}
+
+/**
+ * nativeAmbitWriteRoutes
+ *
+ * Writes the watch's whole route list in one go, via ambit3_write_route_to_watch() in
+ * device_driver_ambit3.c. The watch takes its navigation database as one block, so the JS
+ * side (RouteMerge.ts) passes the routes already on the watch along with the new one: that is
+ * how a send keeps them (routes/05, desktop parity). Each route is already simplified to
+ * <= AMBIT3_MAX_ROUTE_POINTS points (RouteSimplify.ts).
+ *
+ * Several routes cross the JNI boundary as flat primitive arrays: route r owns the next
+ * ptCounts[r] points and wptCounts[r] waypoints, in order. wptPointIndex is relative to the
+ * route's own points.
+ *
+ * @return true on success. On false, check logcat tag "AmbitJNI" for which step failed.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitWriteRoutes(
+        JNIEnv *env, jobject /* thiz */,
+        jobjectArray routeNames, jintArray ptCounts, jintArray wptCounts,
+        jintArray distanceM, jintArray ascentM, jintArray descentM, jlongArray timestampSec,
+        jdoubleArray ptLat, jdoubleArray ptLon, jintArray ptAlt,
+        jdoubleArray wptLat, jdoubleArray wptLon, jobjectArray wptName, jintArray wptPointIndex)
+{
+    if (!g_device) { LOGE("nativeAmbitWriteRoutes: Not connected"); return JNI_FALSE; }
+
+    const jsize route_count = env->GetArrayLength(routeNames);
+    const jsize total_points = env->GetArrayLength(ptLat);
+    const jsize total_wpts = env->GetArrayLength(wptLat);
+    // 0 routes writes an empty navigation database: removing the last route.
+    if (route_count > AMBIT3_MAX_ROUTES) {
+        LOGE("nativeAmbitWriteRoutes: %d routes (0..%d)", route_count, AMBIT3_MAX_ROUTES);
+        return JNI_FALSE;
+    }
+
+    std::vector<jint> pc(route_count), wc(route_count), dist(route_count), asc(route_count), desc(route_count);
+    std::vector<jlong> ts(route_count);
+    env->GetIntArrayRegion(ptCounts, 0, route_count, pc.data());
+    env->GetIntArrayRegion(wptCounts, 0, route_count, wc.data());
+    env->GetIntArrayRegion(distanceM, 0, route_count, dist.data());
+    env->GetIntArrayRegion(ascentM, 0, route_count, asc.data());
+    env->GetIntArrayRegion(descentM, 0, route_count, desc.data());
+    env->GetLongArrayRegion(timestampSec, 0, route_count, ts.data());
+
+    std::vector<jdouble> lat(total_points), lon(total_points), wlat(total_wpts), wlon(total_wpts);
+    std::vector<jint> alt(total_points), widx(total_wpts);
+    env->GetDoubleArrayRegion(ptLat, 0, total_points, lat.data());
+    env->GetDoubleArrayRegion(ptLon, 0, total_points, lon.data());
+    env->GetIntArrayRegion(ptAlt, 0, total_points, alt.data());
+    env->GetDoubleArrayRegion(wptLat, 0, total_wpts, wlat.data());
+    env->GetDoubleArrayRegion(wptLon, 0, total_wpts, wlon.data());
+    env->GetIntArrayRegion(wptPointIndex, 0, total_wpts, widx.data());
+
+    std::vector<ambit3_nav_point_t> points(total_points);
+    for (jsize i = 0; i < total_points; i++) {
+        points[i].latitude  = (int32_t)llround(lat[i] * 1e7);
+        points[i].longitude = (int32_t)llround(lon[i] * 1e7);
+        points[i].altitude  = alt[i];
+    }
+    std::vector<ambit3_nav_waypoint_t> waypoints(total_wpts);
+    for (jsize i = 0; i < total_wpts; i++) {
+        auto jname = (jstring)env->GetObjectArrayElement(wptName, i);
+        const char *n = env->GetStringUTFChars(jname, nullptr);
+        waypoints[i] = {};
+        strncpy(waypoints[i].name, n, sizeof(waypoints[i].name) - 1);
+        env->ReleaseStringUTFChars(jname, n);
+        env->DeleteLocalRef(jname);
+        waypoints[i].latitude    = (int32_t)llround(wlat[i] * 1e7);
+        waypoints[i].longitude   = (int32_t)llround(wlon[i] * 1e7);
+        waypoints[i].point_index = (uint16_t)widx[i];
+    }
+
+    // The route index's timestamp is seconds since an empirically-found, non-standard epoch
+    // (1953-11-25T17:31:44 UTC), pinned to the second by matching a real capture.
+    // timestampSec is Unix time; this offset converts it.
+    static const int64_t AMBIT3_ROUTE_EPOCH_OFFSET_SEC = 508055296; // unix_epoch - route_epoch
+
+    std::vector<ambit3_nav_route_t> routes(route_count);
+    jsize p_off = 0, w_off = 0;
+    for (jsize r = 0; r < route_count; r++) {
+        if (pc[r] < 2 || wc[r] < 1 || p_off + pc[r] > total_points || w_off + wc[r] > total_wpts) {
+            // A route with no waypoint writes fine but never shows in the watch's Navigation
+            // menu (seen on a real watch): the JS side always gives one at least a Start/End.
+            LOGE("nativeAmbitWriteRoutes: route %d has %d points, %d waypoints - refusing", r, pc[r], wc[r]);
+            return JNI_FALSE;
+        }
+        auto jname = (jstring)env->GetObjectArrayElement(routeNames, r);
+        const char *n = env->GetStringUTFChars(jname, nullptr);
+        ambit3_nav_route_t &route = routes[r];
+        route = {};
+        strncpy(route.name, n, sizeof(route.name) - 1);
+        env->ReleaseStringUTFChars(jname, n);
+        env->DeleteLocalRef(jname);
+
+        route.points = points.data() + p_off;
+        route.point_count = (uint16_t)pc[r];
+        route.waypoints = waypoints.data() + w_off;
+        route.waypoint_count = (uint16_t)wc[r];
+        route.distance = (uint32_t)dist[r];
+        route.ascent = (uint16_t)asc[r];
+        route.descent = (uint16_t)desc[r];
+        route.timestamp = (uint32_t)((int64_t)ts[r] + AMBIT3_ROUTE_EPOCH_OFFSET_SEC);
+
+        // month/day/hour/minute/second: the waypoint descriptor's last-modification stamp
+        // (no year, see tools/README.md), from timestampSec in UTC.
+        time_t t = (time_t)ts[r];
+        struct tm tmv;
+        gmtime_r(&t, &tmv);
+        route.month  = (uint8_t)(tmv.tm_mon + 1);
+        route.day    = (uint8_t)tmv.tm_mday;
+        route.hour   = (uint8_t)tmv.tm_hour;
+        route.minute = (uint8_t)tmv.tm_min;
+        route.second = (uint8_t)tmv.tm_sec;
+
+        p_off += pc[r];
+        w_off += wc[r];
+    }
+
+    LOGI("nativeAmbitWriteRoutes: writing %d routes, %d points, %d waypoints",
+         route_count, total_points, total_wpts);
+    int ret = ambit3_write_route_to_watch(g_device, routes.data(), (size_t)route_count);
+    if (ret != 0) { LOGE("ambit3_write_route_to_watch failed: %d", ret); return JNI_FALSE; }
+    return JNI_TRUE;
+}
+
+/**
+ * nativeAmbitAddPoi
+ *
+ * Adds one POI to the watch, preserving every POI already there. Much
+ * smaller/lower-risk than nativeAmbitWriteRoutes: doesn't touch the
+ * Waypoints/Routes flash regions at all, only the POI SBEM list.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitAddPoi(
+        JNIEnv *env, jobject /* thiz */,
+        jstring name, jdouble lat, jdouble lon, jint type)
+{
+    if (!g_device) { LOGE("nativeAmbitAddPoi: Not connected"); return JNI_FALSE; }
+
+    const char *name_utf8 = env->GetStringUTFChars(name, nullptr);
+    LOGI("nativeAmbitAddPoi: adding '%s' (type %d)", name_utf8, (int)type);
+    int ret = ambit3_add_poi_to_watch(g_device, name_utf8, (double)lat, (double)lon, (int)type);
+    env->ReleaseStringUTFChars(name, name_utf8);
+
+    if (ret != 0) { LOGE("ambit3_add_poi_to_watch failed: %d", ret); return JNI_FALSE; }
+    return JNI_TRUE;
+}
+
+/**
+ * nativeAmbitReadRegion
+ *
+ * Reads `length` bytes at `address` and returns them base64-encoded.
+ * Decoding (routes/waypoints structures) happens in TS -- see RouteReader.ts.
+ * Returns null on failure.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitReadRegion(
+        JNIEnv *env, jobject /* thiz */,
+        jlong address, jlong length)
+{
+    if (!g_device) { LOGE("nativeAmbitReadRegion: Not connected"); return nullptr; }
+    // Real, 2026-08-08: Kailash's own TrackLog region is 1,310,713 bytes - the previous
+    // 1024*1024 (1,048,576) cap was tight enough to reject it outright before this device
+    // type existed to test against. Raised to 2MB, still a real sanity bound (every flash
+    // region this project has ever seen, on any watch, is well under that), not removed.
+    if (length <= 0 || length > 2 * 1024 * 1024) { LOGE("nativeAmbitReadRegion: implausible length %lld", (long long)length); return nullptr; }
+
+    std::vector<uint8_t> buffer((size_t)length);
+    LOGI("nativeAmbitReadRegion: reading 0x%06llx / %lld bytes", (long long)address, (long long)length);
+    int ret = ambit3_read_flash_region(g_device, (uint32_t)address, (uint32_t)length, buffer.data());
+    if (ret != 0) { LOGE("ambit3_read_flash_region failed: %d", ret); return nullptr; }
+
+    std::string b64 = base64Encode(buffer.data(), buffer.size());
+    return env->NewStringUTF(b64.c_str());
+}
+
+/**
+ * nativeAmbitSetPoiList
+ *
+ * Replaces the watch's POI list (ambit3_set_poi_list in device_driver_ambit3.c). `expected` is
+ * the raw 0x0b24 read the caller saved a copy of; `newList` the same shape, holding the POIs
+ * to keep. Returns the POI count written, -2 if the watch's list changed since `expected`
+ * (nothing written), -1 on failure.
+ */
+JNIEXPORT jint JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitSetPoiList(
+        JNIEnv *env, jobject /* thiz */, jbyteArray expected, jbyteArray newList)
+{
+    if (!g_device) { LOGE("nativeAmbitSetPoiList: Not connected"); return -1; }
+    const jsize elen = expected ? env->GetArrayLength(expected) : 0;
+    const jsize nlen = newList ? env->GetArrayLength(newList) : 0;
+    std::vector<uint8_t> e((size_t)elen), n((size_t)nlen);
+    if (elen > 0) env->GetByteArrayRegion(expected, 0, elen, reinterpret_cast<jbyte *>(e.data()));
+    if (nlen > 0) env->GetByteArrayRegion(newList, 0, nlen, reinterpret_cast<jbyte *>(n.data()));
+    int ret = ambit3_set_poi_list(g_device, e.data(), e.size(), n.data(), n.size());
+    LOGI("nativeAmbitSetPoiList: %d", ret);
+    return (jint)ret;
+}
+
+/**
+ * nativeAmbitReadPoiListRaw
+ *
+ * Returns the watch's raw POI SBEM0102 reply (0x0b24), base64-encoded, or
+ * null on failure / if the watch genuinely has none (an empty string is a
+ * real, reachable "zero POIs" state, distinct from a read failure).
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitReadPoiListRaw(
+        JNIEnv *env, jobject /* thiz */)
+{
+    if (!g_device) { LOGE("nativeAmbitReadPoiListRaw: Not connected"); return nullptr; }
+
+    uint8_t *raw = nullptr;
+    size_t rawlen = 0;
+    int ret = ambit3_read_poi_list_raw(g_device, &raw, &rawlen);
+    if (ret != 0) {
+        LOGE("ambit3_read_poi_list_raw failed: %d", ret);
+        return nullptr;
+    }
+    std::string b64 = (raw && rawlen > 0) ? base64Encode(raw, rawlen) : std::string();
+    // raw is malloc'd by libambit_protocol_command(); libambit_protocol_free() (protocol.h,
+    // not included here) is verified to be exactly `if (data) free(data);`, so plain free()
+    // is equivalent and avoids pulling in protocol.h just for this.
+    free(raw);
+    return env->NewStringUTF(b64.c_str());
+}
+
+/**
+ * nativeAmbitReadMemoryMapRaw
+ *
+ * Per-device navigation port (2026-08-15). Returns the watch's raw 0x0b21 memory-map reply,
+ * base64-encoded - the region table (Waypoints/Routes/CustomModes/Apps/GlonassSGEE/...) with
+ * each region's own start+size. TS (MemoryMap.ts) parses it exactly like the companion
+ * project's tools/write_nav.py read_memory_map(), so routes/POIs read from the addresses the
+ * watch declares instead of the hardcoded Ambit3 Peak bases (which are wrong on a Traverse).
+ * Null on failure.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitReadMemoryMapRaw(
+        JNIEnv *env, jobject /* thiz */)
+{
+    if (!g_device) { LOGE("nativeAmbitReadMemoryMapRaw: Not connected"); return nullptr; }
+
+    uint8_t *raw = nullptr;
+    size_t rawlen = 0;
+    int ret = ambit3_read_memory_map_raw(g_device, &raw, &rawlen);
+    if (ret != 0) {
+        LOGE("ambit3_read_memory_map_raw failed: %d", ret);
+        return nullptr;
+    }
+    LOGI("nativeAmbitReadMemoryMapRaw(0x0b21): %zu raw bytes", rawlen);
+    std::string b64 = (raw && rawlen > 0) ? base64Encode(raw, rawlen) : std::string();
+    free(raw);  // same equivalence as nativeAmbitReadPoiListRaw's own free(), see its comment
+    return env->NewStringUTF(b64.c_str());
+}
+
+/* ─── Firmware flasher ────────────────────────────────────────────────────────
+ * THE ONE WRITE THAT CAN BRICK. These three are called by Kotlin's firmwareFlash()
+ * orchestrator across USB re-enumerations - see firmware_flash_android.c's header. Each acts
+ * on whatever g_device is currently open (Kotlin re-inits g_device after each re-enumeration).
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitFwEnterBsl(
+        JNIEnv *env, jobject /* thiz */)
+{
+    if (!g_device) { LOGE("nativeAmbitFwEnterBsl: Not connected"); return JNI_FALSE; }
+    return ambit3_fw_enter_bsl(g_device) == 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitFwReboot(
+        JNIEnv *env, jobject /* thiz */)
+{
+    if (!g_device) { LOGE("nativeAmbitFwReboot: Not connected"); return JNI_FALSE; }
+    return ambit3_fw_reboot(g_device) == 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+/* Streams header + payload to a watch already in BSL. doCommit=false stops before the
+ * irreversible 0x0e03 (recoverable); doCommit=true flashes. Blocks for minutes. */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitFwStream(
+        JNIEnv *env, jobject /* thiz */, jbyteArray header, jbyteArray payload, jboolean doCommit, jboolean resume)
+{
+    if (!g_device) { LOGE("nativeAmbitFwStream: Not connected"); return JNI_FALSE; }
+    if (!header || !payload) { LOGE("nativeAmbitFwStream: null header/payload"); return JNI_FALSE; }
+
+    jsize hlen = env->GetArrayLength(header);
+    jsize plen = env->GetArrayLength(payload);
+    jbyte *hbytes = env->GetByteArrayElements(header, nullptr);
+    jbyte *pbytes = env->GetByteArrayElements(payload, nullptr);
+
+    LOGI("nativeAmbitFwStream: header=%d payload=%d commit=%d resume=%d", (int)hlen, (int)plen, (int)doCommit, (int)resume);
+    int ret = ambit3_fw_stream(g_device, (const uint8_t *)hbytes, (size_t)hlen,
+                               (const uint8_t *)pbytes, (size_t)plen, doCommit ? 1 : 0, resume ? 1 : 0);
+
+    env->ReleaseByteArrayElements(header, hbytes, JNI_ABORT);
+    env->ReleaseByteArrayElements(payload, pbytes, JNI_ABORT);
+    return ret == 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+/* [stage, chunksDone, chunksTotal] of the stream above, for the Firmware screen's checklist.
+ * Read-only and lock-free: Kotlin polls it from another thread while nativeAmbitFwStream
+ * blocks. Sends nothing to the watch. */
+JNIEXPORT jintArray JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitFwProgress(
+        JNIEnv *env, jobject /* thiz */)
+{
+    int stage = 0, done = 0, total = 0;
+    ambit3_fw_progress(&stage, &done, &total);
+    jint vals[3] = { stage, done, total };
+    jintArray out = env->NewIntArray(3);
+    if (out) env->SetIntArrayRegion(out, 0, 3, vals);
+    return out;
+}
+
+JNIEXPORT void JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitFwProgressReset(
+        JNIEnv *env, jobject /* thiz */)
+{
+    ambit3_fw_progress_reset();
+}
+
+/**
+ * nativeAmbitReadDeviceHistoryRaw
+ *
+ * Real, 2026-08-08 ("if we could import this data which is on the watch and read it to our
+ * app would be awesome"). Returns the watch's raw sml.DeviceHistory reply (0x1200, entry
+ * 0x67 - see ambit3_read_object_by_id_raw()'s own comment in device_driver_ambit3.c for how
+ * this was found), base64-encoded. Decoding (SBEM0102 entries, the two real unit
+ * conversions - Duration=raw/10, Location=float32 radians - and which entry IDs mean what)
+ * happens in TS, mirroring the companion research project's own tools/kailash_history.py
+ * exactly rather than re-deriving any of it here. Null on failure.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitReadDeviceHistoryRaw(
+        JNIEnv *env, jobject /* thiz */)
+{
+    if (!g_device) { LOGE("nativeAmbitReadDeviceHistoryRaw: Not connected"); return nullptr; }
+
+    uint8_t *raw = nullptr;
+    size_t rawlen = 0;
+    int ret = ambit3_read_object_by_id_raw(g_device, 0x67, &raw, &rawlen);
+    if (ret != 0) {
+        LOGE("ambit3_read_object_by_id_raw(0x67) failed: %d", ret);
+        return nullptr;
+    }
+    LOGI("nativeAmbitReadDeviceHistoryRaw(0x67): %zu raw bytes", rawlen);
+    std::string b64 = (raw && rawlen > 0) ? base64Encode(raw, rawlen) : std::string();
+    free(raw);  // same equivalence as nativeAmbitReadPoiListRaw's own free(), see its comment
+    return env->NewStringUTF(b64.c_str());
+}
+
+/**
+ * nativeAmbitReadDeviceLogRaw
+ *
+ * Kailash test hook (2026-08-09). Reads the watch's raw sml.DeviceLog reply
+ * (0x1200, entry 0x53) — the EPHEMERAL per-activity GPS sample store, distinct
+ * from the persistent DeviceHistory (0x67) summaries above. Same generic
+ * ambit3_read_object_by_id_raw() path, different entry id. Base64-encoded, null
+ * on failure. Diagnostic: this exists to confirm KAILASH-BLE-FINDINGS.md
+ * Finding 7 live — whether DeviceLog returns real samples over an active BLE
+ * session (and only before the 7R app drains it), or comes back empty. The raw
+ * length is logged so a capture-free logcat read answers that. No TS decoder
+ * yet — a non-empty length is the signal; full decode is the follow-up work.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitReadDeviceLogRaw(
+        JNIEnv *env, jobject /* thiz */)
+{
+    if (!g_device) { LOGE("nativeAmbitReadDeviceLogRaw: Not connected"); return nullptr; }
+
+    uint8_t *raw = nullptr;
+    size_t rawlen = 0;
+    int ret = ambit3_read_object_by_id_raw(g_device, 0x53, &raw, &rawlen);
+    if (ret != 0) {
+        LOGE("ambit3_read_object_by_id_raw(0x53) failed: %d", ret);
+        return nullptr;
+    }
+    LOGI("nativeAmbitReadDeviceLogRaw(0x53): %zu raw bytes", rawlen);
+    std::string b64 = (raw && rawlen > 0) ? base64Encode(raw, rawlen) : std::string();
+    free(raw);
+    return env->NewStringUTF(b64.c_str());
+}
+
+/**
+ * nativeAmbitReadObjectRaw
+ *
+ * Any 0x1200 "object by identifier" query, by its query id, base64 of the raw reply (null on
+ * failure). Added 2026-10-18 for the Ambit3's sml.DeviceHistory (query 0x97 on fw 2.4.17):
+ * its 30 daily step counts, decoded in TS (AmbitSteps.ts) like tools/ambit_steps.py. One page:
+ * that reply is ~490 bytes and comes back whole (cursor 0), which the TS decoder checks.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitReadObjectRaw(
+        JNIEnv *env, jobject /* thiz */, jint entryId)
+{
+    if (!g_device) { LOGE("nativeAmbitReadObjectRaw: Not connected"); return nullptr; }
+    if (entryId < 0 || entryId > 0xFF) { LOGE("nativeAmbitReadObjectRaw: id %d out of range", entryId); return nullptr; }
+
+    uint8_t *raw = nullptr;
+    size_t rawlen = 0;
+    int ret = ambit3_read_object_by_id_raw(g_device, (uint8_t)entryId, &raw, &rawlen);
+    if (ret != 0) {
+        LOGE("ambit3_read_object_by_id_raw(0x%02x) failed: %d", entryId, ret);
+        return nullptr;
+    }
+    LOGI("nativeAmbitReadObjectRaw(0x%02x): %zu raw bytes", entryId, rawlen);
+    std::string b64 = (raw && rawlen > 0) ? base64Encode(raw, rawlen) : std::string();
+    free(raw);
+    return env->NewStringUTF(b64.c_str());
+}
+
+/**
+ * nativeAmbitReadSettingsRaw
+ *
+ * Real, 2026-08-08 ("Settings on ambit 3 - if they are already cracked to be changed by
+ * cable, we will need to build a UI for it"). Returns the watch's raw sml.DeviceSettings
+ * reply (0x1100, four zero bytes), base64-encoded. Decoding happens in TS
+ * (AmbitSettingsReader.ts), mirroring the companion research project's own
+ * tools/settings_write.py. Null on failure.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitReadSettingsRaw(
+        JNIEnv *env, jobject /* thiz */)
+{
+    if (!g_device) { LOGE("nativeAmbitReadSettingsRaw: Not connected"); return nullptr; }
+
+    uint8_t *raw = nullptr;
+    size_t rawlen = 0;
+    int ret = ambit3_read_settings_raw(g_device, &raw, &rawlen);
+    if (ret != 0) {
+        LOGE("ambit3_read_settings_raw failed: %d", ret);
+        return nullptr;
+    }
+    std::string b64 = (raw && rawlen > 0) ? base64Encode(raw, rawlen) : std::string();
+    free(raw);
+    return env->NewStringUTF(b64.c_str());
+}
+
+/**
+ * nativeAmbitReadPersonalSettings
+ *
+ * Ambit 1 / Ambit 2 family (USB-only — these have no Bluetooth). Unlike the Ambit3/Kailash
+ * SBEM sml.DeviceSettings (0x1100) path above, the older watches answer the legacy
+ * personal-settings command, which libambit already parses into ambit_personal_settings_t
+ * (device_driver_ambit.c / personal.c, from openambit). We surface the user-facing fields
+ * as JSON; TS maps them to the same settings UI (AmbitPersonalSettingsReader.ts).
+ *
+ * READ-ONLY on purpose: libambit implements no personal-settings *write* (only the unused
+ * 0x0b01 command id exists), and this project won't invent an unverified whole-blob write
+ * to a 2012 watch — see the "prove it, don't brick it" rule this settings code already
+ * follows for Ambit3. Null on failure.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitReadPersonalSettings(
+        JNIEnv *env, jobject /* thiz */)
+{
+    if (!g_device) { LOGE("nativeAmbitReadPersonalSettings: Not connected"); return nullptr; }
+
+    ambit_personal_settings_t *ps = libambit_personal_settings_alloc();
+    if (!ps) return nullptr;
+    int ret = libambit_personal_settings_get(g_device, ps);
+    if (ret != 0) {
+        LOGE("libambit_personal_settings_get failed: %d", ret);
+        libambit_personal_settings_free(ps);
+        return nullptr;
+    }
+    std::ostringstream json;
+    json << "{"
+         << "\"date_format\":"            << (int)ps->date_format           << ","
+         << "\"tones\":"                  << (int)ps->tones_mode            << ","
+         << "\"gps_position_format\":"    << (int)ps->gps_position_format   << ","
+         << "\"button_lock_sport_mode\":" << (int)ps->sportmode_button_lock << ","
+         << "\"button_lock_time_mode\":"  << (int)ps->timemode_button_lock  << ","
+         << "\"units_mode\":"             << (int)ps->units_mode            << ","
+         << "\"language\":"               << (int)ps->language              << ","
+         << "\"time_format\":"            << (int)ps->time_format           << ","
+         << "\"gps_time_keeping\":"       << (int)ps->sync_time_w_gps       << ","
+         << "\"backlight_mode\":"         << (int)ps->backlight_mode        << ","
+         << "\"backlight_brightness\":"   << (int)ps->backlight_brightness  << ","
+         << "\"display_dark\":"           << (int)ps->display_is_negative   << ","
+         << "\"alti_baro_mode\":"         << (int)ps->alti_baro_mode        << ","
+         << "\"storm_alarm\":"            << (int)ps->storm_alarm           << ","
+         // Personal profile + compass declination (Ambit 1/2 read-only; no write exists in
+         // the protocol - confirmed: no 0x0b01 in any Movescount capture). weight is kg*0.01,
+         // length is height in cm, is_male 1/0, compass_declination in the watch's own units.
+         << "\"weight\":"                 << (int)ps->weight                << ","
+         << "\"birth_year\":"             << (int)ps->birthyear             << ","
+         << "\"gender\":"                 << (int)ps->is_male               << ","
+         << "\"height\":"                 << (int)ps->length                << ","
+         << "\"max_hr\":"                 << (int)ps->max_hr                << ","
+         << "\"rest_hr\":"                << (int)ps->rest_hr               << ","
+         << "\"fitness_level\":"          << (int)ps->fitness_level
+         << "}";
+    libambit_personal_settings_free(ps);
+    return env->NewStringUTF(json.str().c_str());
+}
+
+/**
+ * nativeAmbitWritePersonalSetting
+ *
+ * Ambit 1/2 (Bluebird) legacy personal-settings WRITE - the 0x0b01 command openambit/libambit
+ * only ever declared, reverse-engineered from a real SuuntoLink<->Ambit2 USB capture
+ * (2026-08-26, docs/ambit2_protocol_findings.md): the settings struct is 188 bytes on the
+ * Ambit2 (132 on the Ambit1), same field offsets. Read-modify-write: read the whole struct
+ * (0x0b00), patch one field in place at `offset` (`width` 1 or 2, little-endian value), write
+ * the whole thing back (0x0b01) at the device's OWN reply length so the Ambit2's extra tail is
+ * preserved rather than truncated. Guarded to the Bluebird family and bounds-checked. Mirrors
+ * the desktop tools/vendor/ambit_legacy_cli cmd_settings_write, hardware-verified there
+ * (rest_hr round-trip on a real Ambit2). Returns JNI_TRUE on success.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitWritePersonalSetting(
+        JNIEnv * /*env*/, jobject /*thiz*/, jint offset, jint width, jint value)
+{
+    if (!g_device) { LOGE("nativeAmbitWritePersonalSetting: Not connected"); return JNI_FALSE; }
+    uint16_t pid = g_device->device_info.product_id;
+    // Bluebird family only: Ambit1 0x0010, Ambit2 0x0019, Ambit2S 0x001A, Ambit2R 0x001D.
+    if (pid != 0x0010 && pid != 0x0019 && pid != 0x001A && pid != 0x001D) {
+        LOGE("nativeAmbitWritePersonalSetting: not an Ambit1/2 (pid 0x%04x)", pid);
+        return JNI_FALSE;
+    }
+    if (width != 1 && width != 2) { LOGE("nativeAmbitWritePersonalSetting: bad width %d", width); return JNI_FALSE; }
+
+    uint8_t *reply = nullptr;
+    size_t replylen = 0;
+    if (libambit_protocol_command(g_device, 0x0b00, nullptr, 0, &reply, &replylen, 0) != 0
+        || replylen < 132) {
+        if (reply) free(reply);
+        LOGE("nativeAmbitWritePersonalSetting: 0x0b00 read failed (len %zu)", replylen);
+        return JNI_FALSE;
+    }
+    if ((size_t)(offset + width) > replylen) {
+        free(reply);
+        LOGE("nativeAmbitWritePersonalSetting: offset %d+%d beyond struct %zu", offset, width, replylen);
+        return JNI_FALSE;
+    }
+    if (width == 2) {
+        reply[offset] = (uint8_t)(value & 0xff);
+        reply[offset + 1] = (uint8_t)((value >> 8) & 0xff);
+    } else {
+        reply[offset] = (uint8_t)value;
+    }
+    uint8_t *wreply = nullptr;
+    size_t wlen = 0;
+    int rc = libambit_protocol_command(g_device, 0x0b01, reply, replylen, &wreply, &wlen, 0);
+    if (wreply) free(wreply);
+    free(reply);
+    if (rc != 0) {
+        LOGE("nativeAmbitWritePersonalSetting: 0x0b01 write rc %d", rc);
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+/*
+ * nativeAmbitWriteLegacyRegion
+ *
+ * Ambit 1/2 (Bluebird) raw flash-region WRITE - the chunked 0x0b16 data_write followed by the
+ * 0x0b18 COMMIT tail. Both are required: without the 0x0b18 tail the watch acknowledges the 0x0b16
+ * chunks but DISCARDS them (they read back correct in-session but revert after a reconnect - the
+ * exact bug this fixed, 2026-08-27). Reverse-engineered from the real SuuntoLink<->Ambit2 capture
+ * assets/pcap/ambit2_suuntolink_settings_sportmodes.pcap: 1024-byte 0x0b16 chunks to 0x2000, then
+ * 0x0b18 [u32 addr][u32 tailExtra] (no hash). `tailExtra` is region-specific and constant per
+ * region (0xffffffff for the sport-mode region - proven content-independent across 160 real writes
+ * in the pcap; the region CRC for nav), so the JS caller supplies it. The caller passes the FULL
+ * region bytes (read with nativeAmbitReadLegacyRegion, patch in JS, write back) - a read-modify-
+ * write only changes what JS asked to. Guarded to the Bluebird family. Returns JNI_TRUE on success.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitWriteLegacyRegion(
+        JNIEnv *env, jobject /*thiz*/, jlong address, jbyteArray data, jlong tailExtra)
+{
+    if (!g_device) { LOGE("nativeAmbitWriteLegacyRegion: Not connected"); return JNI_FALSE; }
+    uint16_t pid = g_device->device_info.product_id;
+    if (pid != 0x0010 && pid != 0x0019 && pid != 0x001A && pid != 0x001D) {
+        LOGE("nativeAmbitWriteLegacyRegion: not an Ambit1/2 (pid 0x%04x)", pid);
+        return JNI_FALSE;
+    }
+    if (!data) { LOGE("nativeAmbitWriteLegacyRegion: null data"); return JNI_FALSE; }
+    jsize len = env->GetArrayLength(data);
+    if (len <= 0) { LOGE("nativeAmbitWriteLegacyRegion: empty data"); return JNI_FALSE; }
+    jbyte *bytes = env->GetByteArrayElements(data, nullptr);
+
+    // Chunk size is the DEVICE'S OWN driver_param, not a constant: the Ambit2 (Duck) writes 0x400
+    // (1024 B) but the Ambit1 (Bluebird, fw>=1.9) writes 0x200 (512 B) - device_support.c. Sending
+    // 1024-B 0x0b16 chunks to the Ambit1 gets every chunk NAK'd (data_write -1, HW 2026-08-27).
+    // find_first(vid,pid) returns the same supported row libambit's Android init picks, so this
+    // matches the chunk size the running driver was init'd with. Fall back to 0x400 if unknown.
+    const ambit_known_device_t *kd =
+        libambit_device_support_find_first(g_device->device_info.vendor_id, pid);
+    uint16_t chunk = (kd && kd->driver_param) ? (uint16_t)kd->driver_param : 0x400;
+    LOGI("nativeAmbitWriteLegacyRegion: chunk size 0x%x for pid 0x%04x", chunk, pid);
+
+    // A local pmem20 over the connected device. Self-contained so we don't reach into the private
+    // driver_data struct.
+    libambit_pmem20_t pm;
+    memset(&pm, 0, sizeof(pm));
+    int ir = libambit_pmem20_init(&pm, g_device, chunk);
+    int rc = -1;
+    if (ir == 0) {
+        rc = libambit_pmem20_data_write(&pm, (uint32_t)address, (const uint8_t *)bytes, (size_t)len);
+        libambit_pmem20_deinit(&pm);
+    }
+    env->ReleaseByteArrayElements(data, bytes, JNI_ABORT); // read-only, don't copy back
+    if (ir != 0 || rc != 0) {
+        LOGE("nativeAmbitWriteLegacyRegion: init %d / data_write %d at 0x%06llx", ir, rc, (long long)address);
+        return JNI_FALSE;
+    }
+
+    // 0x0b18 COMMIT tail - [u32 addr][u32 tailExtra], no hash (the sport-mode / nav variant).
+    uint32_t addr = (uint32_t)address, ex = (uint32_t)tailExtra;
+    uint8_t tail[8] = {
+        (uint8_t)(addr & 0xff), (uint8_t)((addr >> 8) & 0xff), (uint8_t)((addr >> 16) & 0xff), (uint8_t)((addr >> 24) & 0xff),
+        (uint8_t)(ex & 0xff),   (uint8_t)((ex >> 8) & 0xff),   (uint8_t)((ex >> 16) & 0xff),   (uint8_t)((ex >> 24) & 0xff),
+    };
+    uint8_t *treply = nullptr; size_t tlen = 0;
+    int trc = libambit_protocol_command(g_device, 0x0b18, tail, sizeof(tail), &treply, &tlen, 0);
+    if (treply) free(treply);
+    if (trc != 0) {
+        LOGE("nativeAmbitWriteLegacyRegion: 0x0b18 commit tail rc %d at 0x%06llx", trc, (long long)address);
+        return JNI_FALSE;
+    }
+    LOGI("nativeAmbitWriteLegacyRegion: wrote+committed %d bytes at 0x%06llx (tail 0x%08x)", (int)len, (long long)address, ex);
+    return JNI_TRUE;
+}
+
+/**
+ * nativeAmbitWriteLegacyWaypoints
+ *
+ * Ambit 1/2 (Bluebird) waypoint (POI) WRITE - the command-based path, not a flash-region write.
+ * Legacy waypoints live in the command-accessible nav list (0x0b02/0x0b03 read), NOT the SBEM POI
+ * list (0x0b24, which addPoi/ambit3_add_poi_to_watch use and which is empty on this family). The
+ * write sequence mirrors openambit's ambit_navigation_waypoint_write: 0x0b1b write_start, then
+ * 0x0b04 nav_memory_delete (clears the whole nav list), then one 0x0b05 waypoint_write per point.
+ *
+ * `records` is a flat byte array, 48 bytes per waypoint (little-endian), built by TS:
+ *   [0..15] name  [16..31] route_name  [32] lat i32  [36] lon i32  [40] type(u8, RAW device type)
+ *   [41] year u16 [43] month [44] day [45] hour [46] minute [47] second
+ * We keep `type` RAW (no Movescount table conversion) so a backup round-trips byte-exact - the
+ * conversion openambit does is for Movescount imports, not for our read->write restore.
+ *
+ * IMPORTANT: 0x0b04 may also drop the route region, so the TS caller (restoreLegacyWaypoints)
+ * snapshots + re-writes routes around this call. Returns the count written, or -1 on failure.
+ */
+JNIEXPORT jint JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitWriteLegacyWaypoints(
+        JNIEnv *env, jobject /*thiz*/, jbyteArray records)
+{
+    if (!g_device) { LOGE("nativeAmbitWriteLegacyWaypoints: Not connected"); return -1; }
+    uint16_t pid = g_device->device_info.product_id;
+    if (pid != 0x0010 && pid != 0x0019 && pid != 0x001A && pid != 0x001D) {
+        LOGE("nativeAmbitWriteLegacyWaypoints: not an Ambit1/2 (pid 0x%04x)", pid);
+        return -1;
+    }
+    if (!records) { LOGE("nativeAmbitWriteLegacyWaypoints: null records"); return -1; }
+    jsize len = env->GetArrayLength(records);
+    if (len < 0 || (len % 48) != 0) {
+        LOGE("nativeAmbitWriteLegacyWaypoints: bad record length %d (not a multiple of 48)", (int)len);
+        return -1;
+    }
+    int count = (int)(len / 48);
+    if (count > 250) { LOGE("nativeAmbitWriteLegacyWaypoints: too many waypoints (%d)", count); return -1; }
+
+    // 0x0b1b write_start, then 0x0b04 nav_memory_delete (clear the whole nav list first).
+    uint8_t *reply = nullptr; size_t rlen = 0;
+    if (libambit_protocol_command(g_device, 0x0b1b, nullptr, 0, &reply, &rlen, 0) != 0) {
+        LOGE("nativeAmbitWriteLegacyWaypoints: write_start (0x0b1b) denied"); if (reply) free(reply); return -1;
+    }
+    if (reply) { free(reply); reply = nullptr; }
+    if (libambit_protocol_command(g_device, 0x0b04, nullptr, 0, &reply, &rlen, 0) != 0) {
+        LOGE("nativeAmbitWriteLegacyWaypoints: nav_memory_delete (0x0b04) failed"); if (reply) free(reply); return -1;
+    }
+    if (reply) { free(reply); reply = nullptr; }
+
+    jbyte *buf = env->GetByteArrayElements(records, nullptr);
+    auto rd16 = [](const jbyte *p) -> uint16_t {
+        return (uint16_t)((uint8_t)p[0] | ((uint8_t)p[1] << 8));
+    };
+    auto rd32 = [](const jbyte *p) -> uint32_t {
+        return (uint32_t)((uint8_t)p[0] | ((uint8_t)p[1] << 8) | ((uint8_t)p[2] << 16) | ((uint8_t)p[3] << 24));
+    };
+
+    int wrote = 0, failed = 0;
+    for (int i = 0; i < count; i++) {
+        const jbyte *r = buf + (size_t)i * 48;
+        // Build the 55-byte packed ambit_pack_waypoint packet by hand (no struct dependency).
+        uint8_t p[55];
+        memset(p, 0, sizeof(p));
+        // index (u16 @0) = 0, unknown (u16 @2) = 0
+        memcpy(p + 4, r + 0, 16);                 // name[16]
+        p[19] = 0;                                // ensure name NUL-terminated within the field
+        memcpy(p + 20, r + 16, 16);               // route_name[16]
+        p[35] = 0;
+        uint32_t lat = rd32(r + 32), lon = rd32(r + 36);
+        uint8_t  type = (uint8_t)r[40];
+        uint16_t year = rd16(r + 41);
+        uint8_t  month = (uint8_t)r[43], day = (uint8_t)r[44], hour = (uint8_t)r[45],
+                 minute = (uint8_t)r[46], second = (uint8_t)r[47];
+        p[36] = second; p[37] = minute; p[38] = hour; p[39] = day; p[40] = month; // ctime
+        p[41] = (uint8_t)(year & 0xff); p[42] = (uint8_t)((year >> 8) & 0xff);    // ctime_year u16
+        p[43] = (uint8_t)(lat & 0xff);  p[44] = (uint8_t)((lat >> 8) & 0xff);
+        p[45] = (uint8_t)((lat >> 16) & 0xff); p[46] = (uint8_t)((lat >> 24) & 0xff);
+        p[47] = (uint8_t)(lon & 0xff);  p[48] = (uint8_t)((lon >> 8) & 0xff);
+        p[49] = (uint8_t)((lon >> 16) & 0xff); p[50] = (uint8_t)((lon >> 24) & 0xff);
+        p[51] = type;                             // type (raw device type)
+        // p[52] unknown2 = 0
+        p[53] = (uint8_t)strnlen((const char *)(p + 4), 16); // name_count
+        // p[54] status = 0 (synced)
+        uint8_t *wreply = nullptr; size_t wlen = 0;
+        if (libambit_protocol_command(g_device, 0x0b05, p, sizeof(p), &wreply, &wlen, 0) != 0) {
+            failed++;
+        } else {
+            wrote++;
+        }
+        if (wreply) free(wreply);
+    }
+    env->ReleaseByteArrayElements(records, buf, JNI_ABORT);
+
+    if (failed > 0) {
+        LOGE("nativeAmbitWriteLegacyWaypoints: %d of %d waypoint_write commands failed", failed, count);
+        return -1;
+    }
+    LOGI("nativeAmbitWriteLegacyWaypoints: wrote %d waypoints", wrote);
+    return wrote;
+}
+
+// JSON-escape a fixed-length C string field (watch names are latin1; emit >=0x80 as \u00xx so
+// the payload stays valid UTF-8, the same discipline ambit_legacy_cli.c's json_str uses).
+static void jni_json_escape(std::ostringstream &o, const char *s, size_t maxlen) {
+    for (size_t i = 0; i < maxlen && s[i]; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\\') { o << '\\' << (char)c; }
+        else if (c >= 0x20 && c < 0x7f) { o << (char)c; }
+        else { char buf[8]; snprintf(buf, sizeof buf, "\\u%04x", c); o << buf; }
+    }
+}
+
+/**
+ * nativeAmbitReadLegacyNav
+ *
+ * Ambit 1/2 (Bluebird) waypoints + routes. The legacy family answers 0x0b02/0x0b03, which
+ * libambit_navigation_read() drives (its driver has no navigation_read method, but the
+ * top-level function works - same call the desktop tools/vendor/ambit_legacy_cli `settings`
+ * makes). Android's SBEM POI read (0x0b24) is empty on this family, so PoiService/RouteReader
+ * route here instead for parity with desktop. lat/lon are emitted as raw int32 (degrees*1e7);
+ * TS divides. Null on failure.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitReadLegacyNav(
+        JNIEnv *env, jobject /* thiz */)
+{
+    if (!g_device) { LOGE("nativeAmbitReadLegacyNav: Not connected"); return nullptr; }
+    ambit_personal_settings_t *ps = libambit_personal_settings_alloc();
+    if (!ps) return nullptr;
+    libambit_personal_settings_get(g_device, ps);       // populate base struct (match CLI order)
+    int nav_rc = libambit_navigation_read(g_device, ps); // fills ps->waypoints and ps->routes
+    std::ostringstream json;
+    json << "{\"ok\":" << (nav_rc == 0 ? "true" : "false")
+         << ",\"nav_rc\":" << nav_rc << ",\"waypoints\":[";
+    for (uint16_t i = 0; i < ps->waypoints.count; i++) {
+        ambit_waypoint_t *w = &ps->waypoints.data[i];
+        if (i) json << ",";
+        // Legacy waypoint names are the 16-byte pack field; ambit_navigation_read strncpy's only
+        // 15 bytes into the 50-byte ambit_waypoint_t.name WITHOUT null-terminating, so escaping
+        // sizeof(name)=50 spills uninitialised bytes past a 15-char name (garbage tail). Cap at 15.
+        json << "{\"name\":\"";
+        jni_json_escape(json, w->name, 15);
+        json << "\",\"routeName\":\"";
+        jni_json_escape(json, w->route_name, 15);
+        json << "\",\"index\":" << (int)w->index
+             << ",\"lat_e7\":" << (long)w->latitude
+             << ",\"lon_e7\":" << (long)w->longitude
+             << ",\"type\":" << (int)w->type
+             // ctime so a backup can restore the waypoint's original creation timestamp
+             << ",\"ctime_year\":" << (int)w->ctime_year
+             << ",\"ctime_month\":" << (int)w->ctime_month
+             << ",\"ctime_day\":" << (int)w->ctime_day
+             << ",\"ctime_hour\":" << (int)w->ctime_hour
+             << ",\"ctime_minute\":" << (int)w->ctime_minute
+             << ",\"ctime_second\":" << (int)w->ctime_second << "}";
+    }
+    json << "],\"routes\":[";
+    for (uint8_t i = 0; i < ps->routes.count; i++) {
+        ambit_route_t *r = &ps->routes.data[i];
+        if (i) json << ",";
+        json << "{\"name\":\"";
+        jni_json_escape(json, r->name, sizeof(r->name));
+        json << "\",\"points_count\":" << (int)r->points_count
+             << ",\"activity_id\":" << (int)r->activity_id
+             << ",\"distance\":" << (long)r->distance << "}";
+    }
+    json << "]}";
+    libambit_personal_settings_free(ps);
+    return env->NewStringUTF(json.str().c_str());
+}
+
+/**
+ * nativeAmbitReadLegacyRegion
+ *
+ * Ambit 1/2 (Bluebird) raw flash read. nativeAmbitReadRegion uses ambit3_read_flash_region,
+ * which SIGSEGVs on this family - the Ambit3 flash protocol doesn't apply. This mirrors the
+ * desktop tools/vendor/ambit_legacy_cli cmd_region_dump exactly: 0x0b17 in 512-byte chunks
+ * ([u32 addr][u32 len] request; reply echoes 8 bytes then the data), stopping GRACEFULLY at
+ * the region end (a short/failed chunk = end of region, returns the partial - not an error,
+ * same as the desktop). Returns base64 of what was read (empty string if nothing). Used by
+ * AmbitLegacySportModes.ts for region 0x2000.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitReadLegacyRegion(
+        JNIEnv *env, jobject /* thiz */, jlong address, jlong length)
+{
+    if (!g_device) { LOGE("nativeAmbitReadLegacyRegion: Not connected"); return nullptr; }
+    if (length <= 0 || length > 2 * 1024 * 1024) {
+        LOGE("nativeAmbitReadLegacyRegion: implausible length %lld", (long long)length);
+        return nullptr;
+    }
+    const uint32_t CHUNK = 512;
+    uint32_t total = (uint32_t)length, base = (uint32_t)address, got = 0;
+    std::vector<uint8_t> out;
+    out.reserve(total);
+    while (got < total) {
+        uint32_t want = total - got;
+        if (want > CHUNK) want = CHUNK;
+        uint8_t send[8];
+        uint32_t addr = base + got;
+        send[0] = addr & 0xff;        send[1] = (addr >> 8) & 0xff;
+        send[2] = (addr >> 16) & 0xff; send[3] = (addr >> 24) & 0xff;
+        send[4] = want & 0xff;        send[5] = (want >> 8) & 0xff;
+        send[6] = (want >> 16) & 0xff; send[7] = (want >> 24) & 0xff;
+        uint8_t *reply = nullptr;
+        size_t replylen = 0;
+        if (libambit_protocol_command(g_device, 0x0b17, send, sizeof(send), &reply, &replylen, 0) != 0
+            || replylen < (size_t)want + 8) {
+            if (reply) free(reply);
+            break;  // region ended (partial) - graceful, matches desktop cmd_region_dump
+        }
+        out.insert(out.end(), reply + 8, reply + 8 + want);
+        free(reply);
+        got += want;
+    }
+    LOGI("nativeAmbitReadLegacyRegion: 0x%06x, got %zu of %u bytes", base, out.size(), total);
+    std::string b64 = out.empty() ? std::string() : base64Encode(out.data(), out.size());
+    return env->NewStringUTF(b64.c_str());
+}
+
+/**
+ * nativeAmbitWriteSettingsRaw
+ *
+ * Real, hardware-confirmed 2026-08-08 (see ambit3_write_settings_raw()'s own comment in
+ * device_driver_ambit3.c): writes a full sml.DeviceSettings blob back via 0x1101. `data` is
+ * a plain jbyteArray (Kotlin decodes the base64 string it got from TS before calling this -
+ * no base64 decoding needed on the native side, unlike the read direction). Returns true on
+ * a clean 0x1101 send; this does NOT by itself confirm the write took effect - the caller
+ * (AmbitSettingsWriter.ts) re-reads via nativeAmbitReadSettingsRaw() afterward and compares,
+ * the same "prove it, don't just trust the ACK" rule this project's own live testing found
+ * necessary (custom_modes_andre.md).
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitWriteSettingsRaw(
+        JNIEnv *env, jobject /* thiz */, jbyteArray data)
+{
+    if (!g_device) { LOGE("nativeAmbitWriteSettingsRaw: Not connected"); return JNI_FALSE; }
+    if (!data) { LOGE("nativeAmbitWriteSettingsRaw: null data"); return JNI_FALSE; }
+
+    jsize len = env->GetArrayLength(data);
+    std::vector<uint8_t> buffer((size_t)len);
+    env->GetByteArrayRegion(data, 0, len, reinterpret_cast<jbyte *>(buffer.data()));
+
+    uint8_t *reply = nullptr;
+    size_t replylen = 0;
+    int ret = ambit3_write_settings_raw(g_device, buffer.data(), buffer.size(), &reply, &replylen);
+    free(reply);  // expected empty on success (confirmed live) - not returned to Kotlin
+    if (ret != 0) {
+        LOGE("ambit3_write_settings_raw failed: %d", ret);
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+/**
+ * nativeAmbitSetDateTime
+ *
+ * Real, 2026-08-10 ("I connected the kailash via usb... it didn't sync time... is this
+ * function implemented in our app?"). Writes the phone's own current local time to the
+ * watch. Dispatch by watch/transport (Kailash BLE vs. everything else) happens inside
+ * libambit itself (device_driver_ambit3.c's date_time_set()) - this JNI layer only builds
+ * a real localtime() struct tm (tm_gmtoff/tm_zone populated, required for the Kailash path's
+ * own %z rendering) and calls the transport-agnostic libambit_date_time_set().
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitSetDateTime(
+        JNIEnv *env, jobject /* thiz */)
+{
+    if (!g_device) { LOGE("nativeAmbitSetDateTime: Not connected"); return JNI_FALSE; }
+
+    time_t now = time(nullptr);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+
+    int ret = libambit_date_time_set(g_device, &tmv);
+    if (ret != 0) {
+        LOGE("libambit_date_time_set failed: %d", ret);
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+/**
+ * nativeAmbitReadCustomModesRaw
+ *
+ * Real, 2026-08-08 ("This weekend we will full debug the two watches and built the apps").
+ * Returns the watch's raw 12288-byte CustomModes region (sport modes), base64-encoded, via
+ * the existing generic ambit3_read_flash_region() path (see
+ * ambit3_read_custom_modes_raw()'s own comment in device_driver_ambit3.c). Decoding
+ * (the BXml tag tree - exercise modes, displays, sport-mode slots) happens in TS, mirroring
+ * the companion research project's own tools/custom_modes.py. Null on failure.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitReadCustomModesRaw(
+        JNIEnv *env, jobject /* thiz */)
+{
+    if (!g_device) { LOGE("nativeAmbitReadCustomModesRaw: Not connected"); return nullptr; }
+
+    std::vector<uint8_t> buffer(12288);
+    int ret = ambit3_read_custom_modes_raw(g_device, buffer.data());
+    if (ret != 0) {
+        LOGE("ambit3_read_custom_modes_raw failed: %d", ret);
+        return nullptr;
+    }
+    std::string b64 = base64Encode(buffer.data(), buffer.size());
+    return env->NewStringUTF(b64.c_str());
+}
+
+/**
+ * nativeAmbitWriteCustomModesRaw
+ *
+ * Real mechanism, NOT yet hardware-confirmed on Android specifically - see
+ * ambit3_write_custom_modes_raw()'s own detailed comment in device_driver_ambit3.c for
+ * exactly what is and isn't proven here (the desktop side of this same mechanism is fully
+ * confirmed working; this native port reuses only already-proven building blocks but has
+ * not itself been tested against real hardware). `data` must be the *entire* 12288-byte
+ * CustomModes region (read first via nativeAmbitReadCustomModesRaw(), patch only the
+ * specific bytes to change, send the whole thing back) - matching the discipline every one
+ * of this session's Python write tools already follows. Returns true only if the full
+ * write+tail+commit sequence completed without a protocol-level failure - this does NOT by
+ * itself confirm the watch's live state actually reflects the write; the caller should
+ * re-read via nativeAmbitReadCustomModesRaw() and compare, the same "prove it" rule already
+ * established for settings writes.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitWriteCustomModesRaw(
+        JNIEnv *env, jobject /* thiz */, jbyteArray data)
+{
+    if (!g_device) { LOGE("nativeAmbitWriteCustomModesRaw: Not connected"); return JNI_FALSE; }
+    if (!data) { LOGE("nativeAmbitWriteCustomModesRaw: null data"); return JNI_FALSE; }
+
+    jsize len = env->GetArrayLength(data);
+    if (len != 12288) {
+        LOGE("nativeAmbitWriteCustomModesRaw: expected 12288 bytes, got %d", (int)len);
+        return JNI_FALSE;
+    }
+    std::vector<uint8_t> buffer((size_t)len);
+    env->GetByteArrayRegion(data, 0, len, reinterpret_cast<jbyte *>(buffer.data()));
+
+    int ret = ambit3_write_custom_modes_raw(g_device, buffer.data(), buffer.size());
+    if (ret != 0) {
+        LOGE("ambit3_write_custom_modes_raw failed: %d", ret);
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+/**
+ * nativeAmbitWriteRegion  (EXPERIMENTAL - App-Zone / Training-program, 2026-08-14)
+ *
+ * Generic region write: writes the first `extent` bytes of `data` at flash `address`, then
+ * finalizes with the SAME used-extent SHA256 data-tail as the CustomModes writer (no commit).
+ * `data` is the full region image the caller built; `extent` is how many of its leading bytes
+ * are the real used content (the rest, if any, is 0xFF padding the watch never hashes). The
+ * per-region format correctness lives in TS (proven byte-exact against captures). Returns
+ * false on any protocol-level failure; the caller re-reads to confirm the live state.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitWriteRegion(
+        JNIEnv *env, jobject /* thiz */, jlong address, jbyteArray data, jint extent)
+{
+    if (!g_device) { LOGE("nativeAmbitWriteRegion: Not connected"); return JNI_FALSE; }
+    if (!data) { LOGE("nativeAmbitWriteRegion: null data"); return JNI_FALSE; }
+
+    jsize len = env->GetArrayLength(data);
+    if (extent < 4 || extent > len) {
+        LOGE("nativeAmbitWriteRegion: bad extent %d for %d-byte image", (int)extent, (int)len);
+        return JNI_FALSE;
+    }
+    if (address < 0 || address > 0x00FFFFFF) {
+        LOGE("nativeAmbitWriteRegion: implausible address 0x%llx", (long long)address);
+        return JNI_FALSE;
+    }
+    std::vector<uint8_t> buffer((size_t)len);
+    env->GetByteArrayRegion(data, 0, len, reinterpret_cast<jbyte *>(buffer.data()));
+
+    LOGI("nativeAmbitWriteRegion: 0x%06llx extent=%d (image %d)", (long long)address, (int)extent, (int)len);
+    int ret = ambit3_write_region_raw(g_device, (uint32_t)address, buffer.data(), (size_t)extent);
+    if (ret != 0) {
+        LOGE("ambit3_write_region_raw failed: %d", ret);
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+/**
+ * nativeAmbitDisconnect
+ */
+JNIEXPORT void JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitDisconnect(
+        JNIEnv * /* env */, jobject /* thiz */)
+{
+    LOGI("nativeAmbitDisconnect");
+    g_log_cache.clear();
+    g_log_fit_b64.clear();
+    g_log_dates.clear();
+    if (g_device) {
+        libambit_close(g_device);
+        g_device = nullptr;
+    }
+}
+
+/** Takes or releases the watch's sync lock (0x0b19 check, 0x0b1a set): libambit's
+ * sync_display_show/clear. See AmbitUsbModule.syncDisplay(). */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitSyncDisplay(
+        JNIEnv * /* env */, jobject /* thiz */, jboolean on)
+{
+    if (!g_device) return JNI_FALSE;
+    if (on) libambit_sync_display_show(g_device);
+    else libambit_sync_display_clear(g_device);
+    return JNI_TRUE;
+}
+
+/**
+ * nativeAmbitBleInit
+ *
+ * Constructs g_device from an already-connected, already-discovered BLE
+ * link (Kotlin's AmbitBleModule has connected, handled the Service Changed
+ * indication, re-discovered services, found the custom service's write/
+ * notify characteristics by UUID, and enabled notifications before calling
+ * this — see AmbitBleModule.kt). Reuses the SAME g_device global as the USB
+ * path: every other native export in this file (nativeAmbitWriteRoutes,
+ * nativeAmbitReadRegion, nativeAmbitDisconnect, etc.) already operates on
+ * g_device without caring how it was constructed, so BLE gets all of that
+ * for free — only connection setup and the BLE frame codec (protocol_ble.c)
+ * are new code.
+ *
+ * @param vid Vendor ID  (0x1493 for Suunto)
+ * @param pid Product ID — Ambit3/Traverse only; enforced by AmbitBleModule's
+ *            scan filter before this is ever called, not re-checked here.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ambitsyncmodern_ble_AmbitBleModule_nativeAmbitBleInit(
+        JNIEnv *env, jobject thiz, jint vid, jint pid)
+{
+    LOGI("nativeAmbitBleInit vid=0x%04x pid=0x%04x", vid, pid);
+
+    if (g_device) {
+        libambit_close(g_device);
+        g_device = nullptr;
+    }
+    g_log_cache.clear();
+    g_log_fit_b64.clear();
+    g_log_dates.clear();
+
+    JavaVM *jvm = nullptr;
+    env->GetJavaVM(&jvm);
+
+    g_device = libambit_new_from_ble(jvm, thiz, env, (uint16_t)vid, (uint16_t)pid);
+    if (!g_device) {
+        LOGE("libambit_new_from_ble failed — VID/PID 0x%04x/0x%04x, or device info "
+             "read didn't come back in a recognized shape (see protocol_ble.c)", vid, pid);
+        return JNI_FALSE;
+    }
+
+    LOGI("Ambit BLE initialized successfully (driver selected)");
+    return JNI_TRUE;
+}
+
+/**
+ * nativeAmbitBleOnNotify
+ *
+ * Called by AmbitBleModule.kt's onCharacteristicChanged for every raw GATT
+ * notification received on the watch's notify characteristic. Forwards the
+ * bytes into protocol_ble.c's frame reassembly — NOT called from the same
+ * thread that nativeAmbitWriteRoutes/etc. (and therefore
+ * libambit_protocol_command_ble's blocking wait) run on.
+ */
+JNIEXPORT void JNICALL
+Java_com_ambitsyncmodern_ble_AmbitBleModule_nativeAmbitBleOnNotify(
+        JNIEnv *env, jobject /* thiz */, jbyteArray chunk)
+{
+    jsize len = env->GetArrayLength(chunk);
+    jbyte *bytes = env->GetByteArrayElements(chunk, nullptr);
+
+    pthread_mutex_lock(&g_rx_mtx);
+    if (!g_rx_ready) {
+        // Handshake not armed yet (g_device may still be null) — park the bytes
+        // in order rather than dropping them; jni_ble_flush_rx_stash() replays
+        // them once the handshake is live. See the stash comment above.
+        g_rx_stash.insert(g_rx_stash.end(),
+                          (const uint8_t *)bytes, (const uint8_t *)bytes + len);
+        pthread_mutex_unlock(&g_rx_mtx);
+    } else {
+        pthread_mutex_unlock(&g_rx_mtx);
+        if (g_device) // live: g_device null here means a stray post-disconnect notify
+            ambit_ble_on_notify(g_device, (const uint8_t *)bytes, (size_t)len);
+    }
+    env->ReleaseByteArrayElements(chunk, bytes, JNI_ABORT);
+}
+
+/**
+ * nativeAmbitBleResetRx
+ *
+ * Called from AmbitBleModule.scanAndConnect() before any scan/connect — i.e.
+ * before the watch can write — to arm the pre-init RX stash for a fresh
+ * connection (also re-arms it for a reconnect without an app restart). See the
+ * stash comment on jni_ble_reset_rx_stash / jni_ble_flush_rx_stash above.
+ */
+JNIEXPORT void JNICALL
+Java_com_ambitsyncmodern_ble_AmbitBleModule_nativeAmbitBleResetRx(
+        JNIEnv * /* env */, jobject /* thiz */)
+{
+    jni_ble_reset_rx_stash();
+}
+
+} // extern "C"

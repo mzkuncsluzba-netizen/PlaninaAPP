@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>PlaninaAPP</title>
 <!-- Raise this number with every change, so the Android app offers the update. -->
-<meta name="planina-version" content="5">
+<meta name="planina-version" content="6">
 <meta name="theme-color" content="#c8102e">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -99,6 +99,9 @@ dialog::backdrop{background:rgba(10,14,11,.5)}
 
 .badge{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted);margin-left:6px;vertical-align:2px}
 .verdict{margin:0;font-weight:600}
+.watchStatus{margin:0;font-weight:600;color:var(--track)}
+.watchStatus.bad{color:var(--warn)} .watchStatus.ok{color:var(--ok)}
+.watchStatus:empty{display:none}
 .verdict.ok{color:var(--ok)} .verdict.bad{color:var(--warn)}
 .tblWrap{overflow-x:auto;margin:0 -2px}
 .tbl{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:14px}
@@ -188,7 +191,12 @@ dialog::backdrop{background:rgba(10,14,11,.5)}
 <!-- Posnetki -->
 <dialog id="dlgTracks"><div class="dlg">
   <h2>Posnetki <button class="x" data-close aria-label="Zapri">×</button></h2>
-  <label class="file" for="actIn">Uvozi aktivnost z ure (.gpx)<input type="file" id="actIn" accept=".gpx,application/gpx+xml,application/xml,text/xml"></label>
+  <section id="watchSec" hidden>
+    <button class="btn primary" id="watchBtn" style="width:100%;padding:13px">Prenesi z ure (Bluetooth)</button>
+    <p class="watchStatus" id="watchStatus" aria-live="polite"></p>
+    <p class="muted" id="watchHelp">Pritisni gumb, nato na uri zaženi sinhronizacijo (»Sync now«). Prvič izberi na uri seznanjanje z mobilno aplikacijo (»Pair MobileApp«). Če imaš na telefonu aplikacijo Suunto, jo pred tem zapri, ker bi se ura lahko povezala z njo.</p>
+  </section>
+  <label class="file" for="actIn">Uvozi aktivnost iz datoteke (.gpx)<input type="file" id="actIn" accept=".gpx,application/gpx+xml,application/xml,text/xml"></label>
   <p class="muted">V aplikaciji Suunto odpri aktivnost, tapni ⋮ in izvozi GPX. V aplikaciji za Android lahko izbereš kar »Odpri s« ali »Deli« in nato PlaninaAPP.</p>
   <p class="muted" id="tracksEmpty">Še ni posnetkov. Sem pridejo poti, ki jih posnameš ali uvoziš z ure.</p>
   <ul class="list" id="tracksList"></ul>
@@ -243,7 +251,7 @@ const store={
   set(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){return false}},
   del(k){try{localStorage.removeItem(k)}catch(e){}}
 };
-const K={route:'planina.route',target:'planina.target',session:'planina.session',tracks:'planina.tracks'};
+const K={route:'planina.route',target:'planina.target',session:'planina.session',tracks:'planina.tracks',watchIds:'planina.watchIds'};
 
 /* ---------- formatting ---------- */
 const km=m=>(m/1000).toFixed(m<10000?2:1).replace('.',',');
@@ -365,18 +373,25 @@ function trackStats(pts){
   const ts=pts.filter(p=>p.t).map(p=>p.t);
   return {dist,up,down,start:ts.length?Math.min(...ts):Date.now(),dur:ts.length>1?Math.max(...ts)-Math.min(...ts):0};
 }
-function importActivity(text,filename){
-  let g;try{g=parseGPX(text)}catch(e){toast(e.message);return}
-  if(!g.pts.some(p=>p.t)){toast('Ta .gpx nima časov. To je trasa, ne aktivnost; naloži jo pod »Trasa«.');return}
+function watchIdFromGpx(text){const m=/<metadata>\s*<time>([^<]+)<\/time>/.exec(text);return m?m[1].replace(/[-:Z]/g,'').slice(0,15):null}
+function rememberWatchId(id){if(!id)return;const ids=store.get(K.watchIds,[]);if(!ids.includes(id)){ids.push(id);store.set(K.watchIds,ids)}}
+function importActivity(text,filename,opts={}){
+  const silent=!!opts.silent;
+  let g;try{g=parseGPX(text)}catch(e){if(!silent)toast(e.message);return null}
+  if(opts.watch) rememberWatchId(watchIdFromGpx(text));
+  if(!g.pts.some(p=>p.t)){if(!silent)toast('Ta .gpx nima časov. To je trasa, ne aktivnost; naloži jo pod »Trasa«.');return null}
   const st=trackStats(g.pts);
   const list=store.get(K.tracks,[]);
-  if(list.some(t=>t.start===st.start)){toast('Ta aktivnost je že uvožena.');openAnalysisById(String(st.start));return}
-  const name=g.name||String(filename||'').replace(/\.gpx$/i,'')||`Aktivnost ${new Date(st.start).toLocaleDateString('sl-SI')}`;
+  if(list.some(t=>t.start===st.start)){if(!silent){toast('Ta aktivnost je že uvožena.');openAnalysisById(String(st.start))}return null}
+  const dLbl=new Date(st.start).toLocaleDateString('sl-SI');
+  const name=opts.watch?`${g.name||'Aktivnost'} ${dLbl}`:(g.name||String(filename||'').replace(/\.gpx$/i,'')||`Aktivnost ${dLbl}`);
   const rec={id:String(st.start),name,start:st.start,dur:st.dur,dist:st.dist,up:st.up,down:st.down,src:'ura',pts:g.pts.map(C)};
   list.unshift(rec);list.sort((a,b)=>b.start-a.start);
-  if(!store.set(K.tracks,list)){toast('Za shranjevanje ni prostora. Izbriši starejše posnetke.');return}
+  if(!store.set(K.tracks,list)){toast('Za shranjevanje ni prostora. Izbriši starejše posnetke.');return null}
   if($('#dlgTracks').open)fillTracks();
+  if(silent) return rec;
   if(route) openAnalysis(rec); else toast(`Uvoženo: ${name}. Naloži traso pod »Trasa« za primerjavo časa.`);
+  return rec;
 }
 window.planinaImport=importActivity;
 
@@ -649,7 +664,7 @@ $('#ambitExport').onclick=()=>{
 };
 
 $('#actIn').onchange=async e=>{const f=e.target.files[0];if(!f)return;importActivity(await f.text(),f.name);e.target.value=''};
-$('#openTracks').onclick=()=>{fillTracks();$('#dlgTracks').showModal()};
+$('#openTracks').onclick=()=>{$('#watchSec').hidden=!watchSupported();fillTracks();$('#dlgTracks').showModal()};
 function fillTracks(){
   const list=store.get(K.tracks,[]),ul=$('#tracksList');ul.replaceChildren();$('#tracksEmpty').hidden=list.length>0;
   list.forEach(t=>{
@@ -699,6 +714,36 @@ $('#openMenu').onclick=()=>{fillMenu();$('#updStatus').textContent='';$('#dlgMen
 $('#checkUpd').onclick=()=>{$('#updStatus').textContent='Preverjam …';try{AND.checkUpdate(true)}catch(e){$('#updStatus').textContent='Posodobitev ni na voljo.'}};
 $('#updApply').onclick=reloadApp;
 if(AND&&AND.checkUpdate) setTimeout(()=>{try{AND.checkUpdate(false)}catch(e){}},2500);
+
+/* ---------- Suunto Ambit over Bluetooth (Android) ---------- */
+let watchNew=[],watchBusy=false;
+const watchMsg={scanning:'Iščem uro … Na uri zdaj zaženi sinhronizacijo (»Sync now«).',
+  linking:'Ura je najdena, povezujem …',pairing:'Seznanjam. Potrdi na telefonu ali vpiši kodo, ki jo kaže ura.',
+  handshake:'Povezano, ura odgovarja …'};
+function watchSupported(){try{return !!(AND&&AND.watchConnect&&AND.watchAvailable())}catch(e){return false}}
+function setWatchStatus(t,cls){const el=$('#watchStatus');el.textContent=t;el.className='watchStatus'+(cls?' '+cls:'')}
+function setWatchBusy(b){watchBusy=b;const btn=$('#watchBtn');btn.textContent=b?'Prekliči':'Prenesi z ure (Bluetooth)';btn.classList.toggle('primary',!b)}
+$('#watchBtn').onclick=()=>{
+  if(watchBusy){try{AND.watchCancel()}catch(e){}return}
+  watchNew=[];setWatchBusy(true);setWatchStatus('Pripravljam Bluetooth …');
+  try{AND.watchConnect(JSON.stringify(store.get(K.watchIds,[])))}catch(e){setWatchBusy(false);setWatchStatus('Povezava z uro ni na voljo.','bad')}
+};
+window.planinaWatch=(type,data)=>{
+  if(type==='status'){setWatchStatus(watchMsg[data]||data)}
+  else if(type==='connected'){setWatchStatus(`Povezan z uro ${data}.`)}
+  else if(type==='syncing'){setWatchBusy(true);watchNew=[];setWatchStatus('Berem aktivnosti z ure. To lahko traja nekaj minut, ura naj bo blizu telefona.')}
+  else if(type==='progress'){setWatchStatus(`Prenašam aktivnosti z ure: ${data}`)}
+  else if(type==='gpx'){const rec=importActivity(data,'',{silent:true,watch:true});if(rec)watchNew.push(rec)}
+  else if(type==='done'){
+    setWatchBusy(false);
+    const n=watchNew.length;
+    setWatchStatus(n?`Prenos končan: ${n} ${n===1?'nova aktivnost':n===2?'novi aktivnosti':n<5?'nove aktivnosti':'novih aktivnosti'}.`:'Prenos končan. Na uri ni novih aktivnosti.','ok');
+    if($('#dlgTracks').open)fillTracks();
+    if(n&&route){const last=watchNew.reduce((a,b)=>a.start>b.start?a:b);openAnalysis(last)}
+  }
+  else if(type==='error'){setWatchBusy(false);setWatchStatus(data,'bad')}
+  else if(type==='disconnected'){if(watchBusy){setWatchBusy(false);if(!$('#watchStatus').classList.contains('ok'))setWatchStatus('Povezava z uro je prekinjena.','bad')}}
+};
 
 /* ---------- boot ---------- */
 const saved=store.get(K.route,null);

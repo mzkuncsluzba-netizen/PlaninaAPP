@@ -8,6 +8,7 @@ import android.database.Cursor;
 import android.provider.OpenableColumns;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.WindowManager;
 import android.webkit.GeolocationPermissions;
@@ -23,6 +24,9 @@ import android.widget.Toast;
 
 import androidx.webkit.WebViewAssetLoader;
 
+import com.ambitsyncmodern.ble.AmbitBleModule;
+import com.ambitsyncmodern.usb.AmbitUsbModule;
+
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
@@ -33,6 +37,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.nio.charset.StandardCharsets;
@@ -40,7 +46,7 @@ import java.nio.charset.StandardCharsets;
 public class MainActivity extends Activity {
     private static final String HOST = "appassets.androidplatform.net";
     private static final String START = "https://" + HOST + "/assets/index.html";
-    private static final int REQ_OPEN = 1, REQ_SAVE = 2, REQ_LOC = 3;
+    private static final int REQ_OPEN = 1, REQ_SAVE = 2, REQ_LOC = 3, REQ_BLE = 4;
 
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
@@ -299,8 +305,108 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /* ---------- Suunto Ambit over Bluetooth (protocol from Sommet, GPLv3) ---------- */
+    private AmbitBleModule watch;
+    private AmbitUsbModule watchData;
+    private final ExecutorService watchExec = Executors.newSingleThreadExecutor();
+    private volatile boolean watchSyncing = false;
+    private String[] watchKnownIds = new String[0];
+    private boolean watchLibOk = true;
+
+    private void watchEvent(String type, String data) {
+        final String js = "window.planinaWatch&&window.planinaWatch(" + JSONObject.quote(type) + ","
+                + JSONObject.quote(data == null ? "" : data) + ")";
+        runOnUiThread(() -> web.evaluateJavascript(js, null));
+    }
+
+    private boolean ensureWatch() {
+        if (watch != null) return true;
+        try {
+            watchData = new AmbitUsbModule();
+            watch = new AmbitBleModule(this, new AmbitBleModule.Listener() {
+                @Override public void onStatus(String code) { watchEvent("status", code); }
+                @Override public void onConnected(String name) { watchEvent("connected", name); startWatchSync(); }
+                @Override public void onFailed(String code, String message) { watchEvent("error", message); }
+                @Override public void onDisconnected() { if (!watchSyncing) watchEvent("disconnected", ""); }
+                @Override public void onSyncRequested() { startWatchSync(); }
+            });
+            return true;
+        } catch (Throwable t) {
+            watchLibOk = false;
+            watchEvent("error", "Knjižnica za uro se ni naložila na tem telefonu.");
+            return false;
+        }
+    }
+
+    private String[] blePermissions() {
+        if (Build.VERSION.SDK_INT >= 31) return new String[]{"android.permission.BLUETOOTH_SCAN", "android.permission.BLUETOOTH_CONNECT"};
+        return new String[]{Manifest.permission.ACCESS_FINE_LOCATION};
+    }
+
+    private boolean hasBlePermissions() {
+        for (String p : blePermissions()) if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) return false;
+        return true;
+    }
+
+    private void watchConnect() {
+        if (!ensureWatch()) return;
+        if (!hasBlePermissions()) { requestPermissions(blePermissions(), REQ_BLE); return; }
+        watch.scanAndConnect();
+    }
+
+    private void startWatchSync() {
+        if (watchSyncing || watch == null || !watch.isLive()) return;
+        watchSyncing = true;
+        watchEvent("syncing", "");
+        watchExec.execute(() -> {
+            int imported = 0;
+            boolean lock = false;
+            try {
+                try { lock = watchData.nativeAmbitSyncDisplay(true); } catch (Throwable ignored) { }
+                int n = watchData.nativeAmbitGetLogCount(watchKnownIds);
+                if (n < 0) {
+                    watchEvent("error", "Branje z ure ni uspelo. Poskusi znova.");
+                } else {
+                    for (int i = 0; i < n; i++) {
+                        String gpx = watchData.nativeAmbitGetLogAsGpx(i);
+                        if (gpx != null) { watchEvent("gpx", gpx); imported++; }
+                        watchEvent("progress", (i + 1) + "/" + n);
+                    }
+                    watchEvent("done", String.valueOf(imported));
+                }
+            } catch (Throwable t) {
+                watchEvent("error", "Med branjem ure je prišlo do napake: " + t.getMessage());
+            } finally {
+                if (lock) { try { watchData.nativeAmbitSyncDisplay(false); } catch (Throwable ignored) { } }
+                try { watchData.nativeAmbitDisconnect(); } catch (Throwable ignored) { }
+                watchSyncing = false;
+                runOnUiThread(() -> { if (watch != null) watch.disconnect(); });
+            }
+        });
+    }
+
     /** Called from the page to save an exported .gpx through Android's own "Save as" screen. */
     private class Bridge {
+        @JavascriptInterface
+        public boolean watchAvailable() { return watchLibOk && getPackageManager().hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE); }
+
+        /** knownIdsJson: ["YYYYMMDDTHHMMSS", ...] of moves already in the app, so the watch skips them. */
+        @JavascriptInterface
+        public void watchConnect(String knownIdsJson) {
+            try {
+                org.json.JSONArray a = new org.json.JSONArray(knownIdsJson == null ? "[]" : knownIdsJson);
+                String[] ids = new String[a.length()];
+                for (int i = 0; i < a.length(); i++) ids[i] = a.optString(i, "");
+                watchKnownIds = ids;
+            } catch (Exception e) { watchKnownIds = new String[0]; }
+            runOnUiThread(MainActivity.this::watchConnect);
+        }
+
+        @JavascriptInterface
+        public void watchCancel() {
+            runOnUiThread(() -> { if (watch != null && !watchSyncing) { watch.disconnect(); watchEvent("disconnected", ""); } });
+        }
+
         @JavascriptInterface
         public void checkUpdate(boolean manual) { MainActivity.this.checkUpdate(manual); }
 
@@ -353,6 +459,9 @@ public class MainActivity extends Activity {
         if (req == REQ_LOC && geoCallback != null) {
             geoCallback.invoke(geoOrigin, hasLocation(), false);
             geoCallback = null;
+        } else if (req == REQ_BLE) {
+            if (hasBlePermissions()) watchConnect();
+            else watchEvent("error", "Brez dovoljenja za Bluetooth se z uro ne morem povezati.");
         }
     }
 

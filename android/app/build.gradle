@@ -2,6 +2,8 @@ plugins {
     id 'com.android.application'
 }
 
+def runNo = (System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger()
+
 android {
     namespace 'si.planina.app'
     compileSdk 34
@@ -10,8 +12,8 @@ android {
         applicationId 'si.planina.app'
         minSdk 26
         targetSdk 34
-        versionCode (System.getenv('GITHUB_RUN_NUMBER') ?: '1') as int
-        versionName "1.${System.getenv('GITHUB_RUN_NUMBER') ?: '0'}"
+        versionCode = runNo
+        versionName = "1." + runNo
     }
 
     compileOptions {

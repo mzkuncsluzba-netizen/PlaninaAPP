@@ -5,30 +5,29 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>PlaninaAPP</title>
 <!-- Raise this number with every change, so the Android app offers the update. -->
-<meta name="planina-version" content="6">
+<meta name="planina-version" content="7">
 <meta name="theme-color" content="#c8102e">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="PlaninaAPP">
-<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23c8102e'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%23fff'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap">
 <style>
-/* Layout: one-screen app. A header, then one scrolling column of live figures, the elevation profile and the record controls pinned at the bottom. */
+/* Layout: one screen. Header, then the active route with its best time and the ghost line, actions at the bottom. Lists open as sheets. */
 :root{
   --bg:#eef1ee; --surface:#ffffff; --fg:#18201b; --muted:#5a675e; --line:#d5dcd6;
-  --accent:#c8102e; --accent-fg:#ffffff; --track:#1d5ea8; --ok:#23784a; --warn:#b86a00;
+  --accent:#c8102e; --accent-fg:#ffffff; --track:#1d5ea8; --ghost:#8a958d; --ok:#23784a; --warn:#b86a00;
   --display:"Barlow Condensed","Arial Narrow",system-ui,sans-serif;
   --body:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;
   color-scheme:light;
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
   --bg:#101411; --surface:#191f1b; --fg:#e7ece8; --muted:#97a59b; --line:#2b342e;
-  --accent:#ff4a5c; --accent-fg:#16070a; --track:#6fadff; --ok:#57c08a; --warn:#f0a43a; color-scheme:dark}}
+  --accent:#ff4a5c; --accent-fg:#16070a; --track:#6fadff; --ghost:#7d8a81; --ok:#57c08a; --warn:#f0a43a; color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#101411; --surface:#191f1b; --fg:#e7ece8; --muted:#97a59b; --line:#2b342e;
-  --accent:#ff4a5c; --accent-fg:#16070a; --track:#6fadff; --ok:#57c08a; --warn:#f0a43a; color-scheme:dark}
+  --accent:#ff4a5c; --accent-fg:#16070a; --track:#6fadff; --ghost:#7d8a81; --ok:#57c08a; --warn:#f0a43a; color-scheme:dark}
 
 *{box-sizing:border-box}
 [hidden]{display:none!important}
@@ -42,78 +41,111 @@ button{cursor:pointer}
   padding:calc(8px + env(safe-area-inset-top,0px)) max(16px,env(safe-area-inset-right,0px)) 8px max(16px,env(safe-area-inset-left,0px))}
 .mark{width:24px;height:24px;border-radius:50%;background:var(--accent);display:grid;place-items:center;flex:none}
 .mark::after{content:"";width:12px;height:12px;border-radius:50%;background:#fff}
-.bar h1{font:700 22px/1 var(--display);letter-spacing:.01em;margin:0 0 0 4px;flex:1}
+.bar h1{font:700 20px/1 var(--display);letter-spacing:.01em;margin:0 0 0 4px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bar h1 span{color:var(--accent)}
-.tbtn{border:1px solid var(--line);background:transparent;border-radius:999px;padding:6px 11px;font-weight:600;font-size:13px;flex:none}
+.tbtn{border:1px solid var(--line);background:transparent;border-radius:999px;padding:6px 9px;font-weight:600;font-size:13px;flex:none}
 .tbtn.icon{padding:5px 9px;font-size:17px;line-height:1}
-.bar h1{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.panel{flex:1;overflow:auto;display:flex;flex-direction:column;gap:16px;
+  padding-block:16px calc(14px + env(safe-area-inset-bottom,0px));
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
 .notice{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-radius:10px;padding:8px 12px;font-weight:600;color:var(--track);background:color-mix(in srgb,var(--track) 12%,transparent);border:1px solid color-mix(in srgb,var(--track) 35%,transparent)}
 .notice span{flex:1;min-width:0}
 .notice .btn{padding:6px 12px}
-
-.panel{flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px;
-  padding-block:12px calc(12px + env(safe-area-inset-bottom,0px));
-  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
-.routeLine{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:13px;color:var(--muted)}
-.routeLine b{color:var(--fg);font:600 17px/1.1 var(--display);letter-spacing:.01em;min-width:0;overflow-wrap:anywhere}
 .alert{border-radius:10px;padding:8px 12px;font-weight:600;background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 40%,transparent)}
+
+.route{display:flex;flex-direction:column;gap:2px;border:none;background:none;padding:0;text-align:left}
+.route .name{font:700 30px/1.05 var(--display);letter-spacing:.005em;overflow-wrap:anywhere;text-wrap:balance}
+.route .meta{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+.empty{display:flex;flex-direction:column;gap:8px;padding:24px 0}
+.empty h2{font:700 28px/1.1 var(--display);margin:0}
+.empty p{margin:0;color:var(--muted);max-width:40ch}
+
 .stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px}
 .stat{min-width:0}
 .stat .l{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .stat .v{font:600 38px/1.05 var(--display);font-variant-numeric:tabular-nums;white-space:nowrap}
 .stat .v small{font-size:18px;font-weight:500;color:var(--muted);margin-left:2px}
 .stat .v.ok{color:var(--ok)} .stat .v.bad{color:var(--warn)}
-.divider{height:1px;background:var(--line)}
-#profile{width:100%;height:110px;display:block}
-.actions{display:flex;gap:8px}
+.stat .s{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.dlg .stats .v{font-size:28px}
+@media (max-width:360px){.stat .v{font-size:32px}}
+
+/* Ghost line: start ---- finish, with you and your best time on it */
+.ghost{display:flex;flex-direction:column;gap:6px}
+.ghost .head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.ghost .head .l{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.ghost .delta{font:600 20px/1 var(--display);font-variant-numeric:tabular-nums}
+.ghost .delta.ok{color:var(--ok)} .ghost .delta.bad{color:var(--warn)}
+.gl{position:relative;height:58px;margin:0 9px}
+.gl .rail{position:absolute;left:0;right:0;top:26px;height:4px;border-radius:2px;background:var(--line)}
+.gl .done{position:absolute;left:0;top:26px;height:4px;border-radius:2px;background:var(--track)}
+.gl .end{position:absolute;top:20px;width:2px;height:16px;background:var(--muted)}
+.gl .end.a{left:0} .gl .end.b{right:0}
+.gl .dot{position:absolute;top:19px;width:18px;height:18px;margin-left:-9px;border-radius:50%;transition:left .25s linear}
+.gl .dot.me{background:var(--track);border:3px solid var(--surface);box-shadow:0 0 0 1px var(--track);z-index:2}
+.gl .dot.gh{border:2px dashed var(--ghost);background:color-mix(in srgb,var(--ghost) 18%,var(--surface))}
+.gl .tag{position:absolute;top:42px;transform:translateX(-50%);font-size:11px;font-weight:600;white-space:nowrap;transition:left .25s linear}
+.gl .tag.me{color:var(--track)} .gl .tag.gh{color:var(--ghost);top:0}
+.ghost .ends{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.replay{display:flex;align-items:center;gap:10px}
+.replay input{flex:1;accent-color:var(--track)}
+.replay .t{font:600 18px/1 var(--display);font-variant-numeric:tabular-nums;min-width:62px;text-align:right}
+
+.actions{display:flex;gap:8px;margin-top:auto}
 .actions button{flex:1;border-radius:12px;padding:13px 10px;font-weight:600;font-size:16px;border:1px solid var(--line);background:transparent}
 .actions .primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
 .hint{font-size:12px;color:var(--muted);margin:0}
+.hint:empty{display:none}
 .gps{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
 .gps i{width:9px;height:9px;border-radius:50%;background:var(--line);flex:none}
 .gps.good i{background:var(--ok)} .gps.weak i{background:var(--warn)}
-.actions{margin-top:auto}
 
 dialog{border:none;border-radius:16px;padding:0;background:var(--surface);color:var(--fg);width:min(520px,calc(100% - 24px));max-height:calc(100% - 40px)}
 dialog::backdrop{background:rgba(10,14,11,.5)}
 .dlg{display:flex;flex-direction:column;gap:14px;padding:18px 18px 20px}
-.dlg h2{font:700 24px/1.1 var(--display);margin:0;display:flex;justify-content:space-between;align-items:center;gap:8px}
-.dlg h3{font:600 17px/1.2 var(--display);letter-spacing:.02em;text-transform:uppercase;margin:0;color:var(--muted)}
+.dlg h2{font:700 24px/1.1 var(--display);margin:0;display:flex;justify-content:space-between;align-items:center;gap:8px;min-width:0}
+.dlg h2 span{min-width:0;overflow-wrap:anywhere}
+.dlg h3{font:600 15px/1.2 var(--display);letter-spacing:.04em;text-transform:uppercase;margin:0;color:var(--muted)}
 .dlg section{display:flex;flex-direction:column;gap:8px}
-.x{border:none;background:transparent;font-size:26px;line-height:1;padding:0 4px;color:var(--muted)}
+.x{border:none;background:transparent;font-size:26px;line-height:1;padding:0 4px;color:var(--muted);flex:none}
 .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .btn{border:1px solid var(--line);background:transparent;border-radius:10px;padding:10px 14px;font-weight:600}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+.btn.wide{width:100%;padding:13px}
 .btn.danger{color:var(--accent)}
 .btn.danger.armed{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
-.file{display:block;border:1.5px dashed var(--line);border-radius:12px;padding:16px;text-align:center;font-weight:600}
+.file{display:block;border:1.5px dashed var(--line);border-radius:12px;padding:14px;text-align:center;font-weight:600}
 .file input{display:none}
-.num{width:72px;border:1px solid var(--line);border-radius:10px;padding:9px 10px;background:var(--bg);font-variant-numeric:tabular-nums}
 .txt{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--bg)}
+.num{width:72px;border:1px solid var(--line);border-radius:10px;padding:9px 10px;background:var(--bg);font-variant-numeric:tabular-nums}
 .muted{color:var(--muted);font-size:13px;margin:0}
-.list{display:flex;flex-direction:column;gap:0;margin:0;padding:0;list-style:none}
-.list li{display:flex;flex-direction:column;gap:6px;padding:12px 0;border-top:1px solid var(--line)}
-.list .t{font-weight:600;overflow-wrap:anywhere}
-.list .m{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
-.list .row .btn{padding:7px 11px;font-size:13px}
-
-.badge{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted);margin-left:6px;vertical-align:2px}
+.list{display:flex;flex-direction:column;margin:0;padding:0;list-style:none}
+.list li{border-top:1px solid var(--line)}
+.item{display:flex;align-items:center;gap:12px;width:100%;padding:12px 0;border:none;background:none;text-align:left}
+.item .body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.item .t{font-weight:600;overflow-wrap:anywhere}
+.item .m{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+.item .r{font:600 22px/1 var(--display);font-variant-numeric:tabular-nums;flex:none;text-align:right}
+.item .r small{display:block;font:500 11px/1.4 var(--body);color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.item.active .t::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent);margin-right:7px;vertical-align:2px}
+.more{display:flex;flex-direction:column;gap:8px;padding:0 0 14px}
+.more .row .btn{padding:7px 11px;font-size:13px}
+.badge{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;padding:1px 6px;border-radius:999px;border:1px solid var(--line);color:var(--muted);margin-left:6px;vertical-align:2px}
+.best{color:var(--ok)}
 .verdict{margin:0;font-weight:600}
+.verdict.ok{color:var(--ok)} .verdict.bad{color:var(--warn)}
 .watchStatus{margin:0;font-weight:600;color:var(--track)}
 .watchStatus.bad{color:var(--warn)} .watchStatus.ok{color:var(--ok)}
 .watchStatus:empty{display:none}
-.verdict.ok{color:var(--ok)} .verdict.bad{color:var(--warn)}
-.tblWrap{overflow-x:auto;margin:0 -2px}
+.tblWrap{overflow-x:auto}
 .tbl{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:14px}
-.tbl th{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);text-align:right;padding:6px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+.tbl th{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);text-align:right;padding:6px;border-bottom:1px solid var(--line);white-space:nowrap}
 .tbl td{text-align:right;padding:7px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
 .tbl th:first-child,.tbl td:first-child{text-align:left}
 .tbl td.ok{color:var(--ok)} .tbl td.bad{color:var(--warn)}
-.tbl tfoot td{font-weight:600;border-bottom:none}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(24px + env(safe-area-inset-bottom,0px));z-index:9999;background:var(--fg);color:var(--bg);
   padding:10px 16px;border-radius:999px;font-weight:600;font-size:14px;max-width:calc(100% - 32px);text-align:center}
-@media (max-width:360px){.stat .v{font-size:32px}}
-.dlg .stats .v{font-size:28px}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
@@ -122,125 +154,112 @@ dialog::backdrop{background:rgba(10,14,11,.5)}
 <header class="bar">
   <div class="mark" aria-hidden="true"></div>
   <h1>Planina<span>APP</span></h1>
-  <button class="tbtn" id="openRoute">Trasa</button>
-  <button class="tbtn" id="openTracks">Posnetki</button>
+  <button class="tbtn" id="openRoutes">Trase</button>
+  <button class="tbtn" id="openActs">Aktivnosti</button>
   <button class="tbtn icon" id="openMenu" aria-label="Meni">⋮</button>
 </header>
 
-<section class="panel">
-  <div class="gps" id="gps"><i></i><span>GPS ni vklopljen</span></div>
+<main class="panel">
   <div class="notice" id="updNotice" hidden><span id="updTxt"></span><button class="btn" id="updApply">Uporabi zdaj</button></div>
-  <div class="routeLine" id="routeLine" hidden></div>
+  <div class="gps" id="gps" hidden><i></i><span></span></div>
+
+  <div class="empty" id="emptyState" hidden>
+    <h2>Še nimaš trase</h2>
+    <p>Pot posnemi z uro kot običajno aktivnost, jo prenesi v aplikacijo in shrani kot traso. Lahko pa traso naložiš iz datoteke .gpx.</p>
+  </div>
+
+  <button class="route" id="routeHead" hidden aria-label="Zamenjaj traso">
+    <span class="name" id="routeName"></span>
+    <span class="meta" id="routeMeta"></span>
+  </button>
+
   <div class="alert" id="offRoute" hidden></div>
+  <div class="stats" id="mainStats"></div>
 
-  <div class="stats">
-    <div class="stat"><div class="l">Čas</div><div class="v" id="vTime">0:00:00</div></div>
-    <div class="stat"><div class="l">Razdalja</div><div class="v" id="vDist">0,00<small>km</small></div></div>
-    <div class="stat"><div class="l">Vzpon</div><div class="v" id="vUp">0<small>m</small></div></div>
-    <div class="stat"><div class="l">Povprečno</div><div class="v" id="vSpeed">–<small>km/h</small></div></div>
+  <div class="ghost" id="liveGhost" hidden>
+    <div class="head"><span class="l">Proti najboljšemu času</span><span class="delta" id="liveDelta"></span></div>
+    <div class="gl" id="liveGl"></div>
+    <div class="ends"><span>Start</span><span>Cilj</span></div>
   </div>
 
-  <div id="routeStats" hidden>
-    <div class="divider" style="margin-bottom:10px"></div>
-    <div class="stats">
-      <div class="stat"><div class="l">Do cilja</div><div class="v" id="vRemain">–<small>km</small></div></div>
-      <div class="stat"><div class="l">Še hoje</div><div class="v" id="vEta">–</div></div>
-      <div class="stat"><div class="l">Prihod</div><div class="v" id="vArrive">–</div></div>
-      <div class="stat"><div class="l">Načrt</div><div class="v" id="vPlan">–</div></div>
-    </div>
-    <canvas id="profile" style="margin-top:10px" aria-label="Višinski profil trase"></canvas>
+  <div class="actions" id="idleActions">
+    <button class="primary" id="btnWatch">Prenesi z ure</button>
+    <button id="btnStart">Začni s telefonom</button>
   </div>
-
-  <div class="actions">
-    <button class="primary" id="btnStart">Začni</button>
-    <button id="btnPause" hidden>Pavza</button>
-    <button id="btnFinish" hidden>Končaj</button>
+  <div class="actions" id="recActions" hidden>
+    <button id="btnPause">Pavza</button>
+    <button class="primary" id="btnFinish">Končaj</button>
   </div>
-  <p class="hint" id="hint">Naloži traso pod »Trasa« ali takoj začni snemati svojo pot.</p>
-</section>
+  <p class="hint" id="hint"></p>
+</main>
 
-<!-- Trasa -->
-<dialog id="dlgRoute"><div class="dlg">
-  <h2>Trasa <button class="x" data-close aria-label="Zapri">×</button></h2>
-  <label class="file" for="gpxIn">Naloži datoteko .gpx<input type="file" id="gpxIn" accept=".gpx,application/gpx+xml,application/xml,text/xml"></label>
-  <section id="routeInfo" hidden>
-    <p class="muted" id="routeInfoTxt"></p>
-    <div class="row"><button class="btn danger" id="clearRoute">Odstrani traso</button></div>
-  </section>
-  <section>
-    <h3>Ciljni čas</h3>
-    <p class="muted">Med hojo vidiš, ali si pred načrtom ali za njim. Pusti prazno, če ga ne potrebuješ.</p>
-    <div class="row">
-      <input class="num" id="tH" type="number" min="0" max="99" inputmode="numeric" placeholder="ur"> h
-      <input class="num" id="tM" type="number" min="0" max="59" inputmode="numeric" placeholder="min"> min
-      <button class="btn" id="saveTarget">Shrani</button>
-      <button class="btn" id="useDin" hidden>Uporabi oceno DIN</button>
-    </div>
-  </section>
-  <section id="ambitSec" hidden>
-    <h3>Za uro Suunto Ambit</h3>
-    <p class="muted">Ambit sprejme največ 100 točk za vse trase skupaj. Tu traso poenostaviš in odstraniš ločene točke (waypointe), nato jo uvoziš v aplikacijo Suunto.</p>
-    <div class="row">
-      Največ <input class="num" id="ambitN" type="number" min="10" max="100" value="90" inputmode="numeric"> točk
-      <button class="btn primary" id="ambitExport">Izvozi za Ambit</button>
-    </div>
-    <p class="muted" id="ambitRes"></p>
-  </section>
+<!-- Trase -->
+<dialog id="dlgRoutes"><div class="dlg">
+  <h2><span>Trase</span> <button class="x" data-close aria-label="Zapri">×</button></h2>
+  <p class="muted" id="routesEmpty">Še ni shranjenih tras. Shrani aktivnost z ure kot traso (pod Aktivnosti) ali dodaj .gpx.</p>
+  <ul class="list" id="routesList"></ul>
+  <label class="file" for="routeIn">Dodaj traso iz datoteke .gpx<input type="file" id="routeIn" accept=".gpx,application/gpx+xml,application/xml,text/xml"></label>
 </div></dialog>
 
-<!-- Posnetki -->
-<dialog id="dlgTracks"><div class="dlg">
-  <h2>Posnetki <button class="x" data-close aria-label="Zapri">×</button></h2>
+<!-- Časi na trasi -->
+<dialog id="dlgTimes"><div class="dlg">
+  <h2><span id="timesTitle"></span> <button class="x" data-close aria-label="Zapri">×</button></h2>
+  <p class="muted" id="timesSub"></p>
+  <ul class="list" id="timesList"></ul>
+</div></dialog>
+
+<!-- Aktivnosti -->
+<dialog id="dlgActs"><div class="dlg">
+  <h2><span>Aktivnosti</span> <button class="x" data-close aria-label="Zapri">×</button></h2>
   <section id="watchSec" hidden>
-    <button class="btn primary" id="watchBtn" style="width:100%;padding:13px">Prenesi z ure (Bluetooth)</button>
+    <button class="btn primary wide" id="watchBtn">Prenesi z ure</button>
     <p class="watchStatus" id="watchStatus" aria-live="polite"></p>
-    <p class="muted" id="watchHelp">Pritisni gumb, nato na uri zaženi sinhronizacijo (»Sync now«). Prvič izberi na uri seznanjanje z mobilno aplikacijo (»Pair MobileApp«). Če imaš na telefonu aplikacijo Suunto, jo pred tem zapri, ker bi se ura lahko povezala z njo.</p>
+    <p class="muted">Pritisni gumb, nato na uri zaženi sinhronizacijo (»Sync now«). Prvič na uri izberi seznanjanje z mobilno aplikacijo (»Pair MobileApp«). Aplikacijo Suunto na telefonu pred tem zapri.</p>
   </section>
-  <label class="file" for="actIn">Uvozi aktivnost iz datoteke (.gpx)<input type="file" id="actIn" accept=".gpx,application/gpx+xml,application/xml,text/xml"></label>
-  <p class="muted">V aplikaciji Suunto odpri aktivnost, tapni ⋮ in izvozi GPX. V aplikaciji za Android lahko izbereš kar »Odpri s« ali »Deli« in nato PlaninaAPP.</p>
-  <p class="muted" id="tracksEmpty">Še ni posnetkov. Sem pridejo poti, ki jih posnameš ali uvoziš z ure.</p>
-  <ul class="list" id="tracksList"></ul>
+  <ul class="list" id="actsList"></ul>
+  <p class="muted" id="actsEmpty">Še ni aktivnosti. Prenesi jih z ure ali uvozi .gpx.</p>
+  <label class="file" for="actIn">Uvozi aktivnost iz datoteke .gpx<input type="file" id="actIn" accept=".gpx,application/gpx+xml,application/xml,text/xml"></label>
+</div></dialog>
+
+<!-- Analiza -->
+<dialog id="dlgAnalysis"><div class="dlg">
+  <h2><span id="anTitle"></span> <button class="x" data-close aria-label="Zapri">×</button></h2>
+  <p class="muted" id="anSub"></p>
+  <div class="stats" id="anStats"></div>
+  <p class="verdict" id="anVerdict"></p>
+  <div class="ghost" id="anGhost" hidden>
+    <div class="head"><span class="l" id="anGhostLbl">Dirka z najboljšim</span><span class="delta" id="anDelta"></span></div>
+    <div class="gl" id="anGl"></div>
+    <div class="replay"><button class="btn" id="anPlay" aria-label="Predvajaj">▶</button><input type="range" id="anSlider" min="0" max="1000" value="1000" aria-label="Čas"><span class="t" id="anT"></span></div>
+  </div>
+  <div class="tblWrap"><table class="tbl" id="anTable"></table></div>
+  <p class="muted" id="anNote"></p>
+</div></dialog>
+
+<!-- Konec snemanja s telefonom -->
+<dialog id="dlgFinish"><div class="dlg">
+  <h2><span>Konec</span></h2>
+  <p class="muted" id="finishSum"></p>
+  <div class="row">
+    <button class="btn primary" id="fSave">Shrani</button>
+    <button class="btn" id="fResume">Nadaljuj</button>
+    <button class="btn danger" id="fDiscard" data-label="Zavrzi">Zavrzi</button>
+  </div>
 </div></dialog>
 
 <!-- Meni -->
 <dialog id="dlgMenu"><div class="dlg">
-  <h2>PlaninaAPP <button class="x" data-close aria-label="Zapri">×</button></h2>
+  <h2><span>PlaninaAPP</span> <button class="x" data-close aria-label="Zapri">×</button></h2>
   <section>
-    <h3>Posodobitve</h3>
     <p class="muted" id="verTxt"></p>
     <div class="row" id="updRow" hidden><button class="btn primary" id="checkUpd">Preveri posodobitve</button></div>
     <p class="muted" id="updStatus" aria-live="polite"></p>
   </section>
   <section id="apkSec" hidden>
-    <h3>Android aplikacija</h3>
-    <p class="muted">Večina sprememb pride z gumbom zgoraj. Nov APK potrebuješ le, ko se spremeni sama Android lupina; takrat ti povem.</p>
-    <div class="row"><a class="btn" href="https://github.com/mzkuncsluzba-netizen/PlaninaAPP/releases/latest">Odpri stran z APK</a></div>
+    <p class="muted">Nov APK je potreben le, ko se spremeni Android del aplikacije.</p>
+    <div class="row"><a class="btn" href="https://github.com/mzkuncsluzba-netizen/PlaninaAPP/releases/latest">Stran z APK</a></div>
   </section>
-</div></dialog>
-
-<!-- Analiza -->
-<dialog id="dlgAnalysis"><div class="dlg">
-  <h2><span id="anTitle">Analiza</span> <button class="x" data-close aria-label="Zapri">×</button></h2>
-  <p class="muted" id="anSub"></p>
-  <div class="stats" id="anStats"></div>
-  <p class="verdict" id="anVerdict"></p>
-  <div class="tblWrap"><table class="tbl" id="anTable"></table></div>
-  <p class="muted" id="anNote"></p>
-</div></dialog>
-
-<!-- Konec -->
-<dialog id="dlgFinish"><div class="dlg">
-  <h2>Konec snemanja</h2>
-  <p class="muted" id="finishSum"></p>
-  <input class="txt" id="finishName" placeholder="Ime poti">
-  <div class="row">
-    <button class="btn primary" id="fSaveExp">Shrani in izvozi .gpx</button>
-    <button class="btn" id="fSave">Samo shrani</button>
-  </div>
-  <div class="row">
-    <button class="btn" id="fResume">Nadaljuj snemanje</button>
-    <button class="btn danger" id="fDiscard">Zavrzi</button>
-  </div>
+  <p class="muted">Odprta koda pod GPLv3. Povezava z uro temelji na projektih Sommet in openambit.</p>
 </div></dialog>
 
 <script>
@@ -251,15 +270,20 @@ const store={
   set(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){return false}},
   del(k){try{localStorage.removeItem(k)}catch(e){}}
 };
-const K={route:'planina.route',target:'planina.target',session:'planina.session',tracks:'planina.tracks',watchIds:'planina.watchIds'};
+const K={routes:'planina.routes',active:'planina.active',tracks:'planina.tracks',session:'planina.session',watchIds:'planina.watchIds',
+  oldRoute:'planina.route',oldTarget:'planina.target'};
 
 /* ---------- formatting ---------- */
 const km=m=>(m/1000).toFixed(m<10000?2:1).replace('.',',');
 function dur(ms,sec=true){ms=Math.max(0,ms);const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor(s%3600/60),r=s%60;
   return sec?`${h}:${String(m).padStart(2,'0')}:${String(r).padStart(2,'0')}`:`${h}:${String(m).padStart(2,'0')}`}
-const clock=t=>new Date(t).toLocaleTimeString('sl-SI',{hour:'2-digit',minute:'2-digit'});
+const signed=ms=>{const a=Math.abs(ms),s=Math.round(a/1000);const t=s<3600?`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`:dur(a,false);return (ms<0?'−':'+')+t};
+const dstr=t=>new Date(t).toLocaleDateString('sl-SI');
 let toastT;function toast(msg){let el=$('.toast');if(!el){el=document.createElement('div');el.className='toast';document.body.appendChild(el)}
   el.textContent=msg;el.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>el.hidden=true,3200)}
+function h(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+function arm(b,t){if(b.dataset.armed){return true}b.dataset.armed='1';b.classList.add('armed');const old=b.textContent;b.textContent=t;
+  clearTimeout(b._t);b._t=setTimeout(()=>{delete b.dataset.armed;b.classList.remove('armed');b.textContent=old},4000);return false}
 
 /* ---------- geometry ---------- */
 function hav(a,b){const R=6371000,r=Math.PI/180,dLa=(b.lat-a.lat)*r,dLo=(b.lon-a.lon)*r;
@@ -277,7 +301,7 @@ function parseGPX(text){
     const tm=n.getElementsByTagName('time')[0];const t=tm?Date.parse(tm.textContent.trim()):NaN;
     return {lat:parseFloat(n.getAttribute('lat')),lon:parseFloat(n.getAttribute('lon')),ele:isNaN(v)?null:v,t:isNaN(t)?null:t}})
     .filter(p=>isFinite(p.lat)&&isFinite(p.lon));
-  if(pts.length<2) throw new Error('V datoteki ni dovolj točk trase.');
+  if(pts.length<2) throw new Error('V datoteki ni dovolj točk.');
   const nm=doc.querySelector('trk > name')||doc.querySelector('rte > name')||doc.querySelector('metadata > name');
   return {name:(nm&&nm.textContent.trim())||'',pts};
 }
@@ -285,17 +309,18 @@ function parseGPX(text){
 /* Hiking time per DIN 33466: 4 km/h on the flat, 300 m/h up, 500 m/h down; the larger part plus half the smaller. */
 function dinMs(distM,up,down){const th=distM/1000/4,tv=up/300+down/500;return (Math.max(th,tv)+Math.min(th,tv)/2)*3600000}
 
-function buildRoute(name,pts){
-  const cum=[0],cu=[0],cd=[0];let up=0,down=0,ref=pts[0].ele;
+function buildRoute(r){
+  const pts=r.pts.map(P);
+  const cum=[0],cu=[0];let up=0,down=0,ref=pts[0].ele;
   for(let i=1;i<pts.length;i++){
     cum[i]=cum[i-1]+hav(pts[i-1],pts[i]);
     const e=pts[i].ele;
     if(e!=null){ if(ref==null) ref=e; else {const d=e-ref; if(d>=3){up+=d;ref=e} else if(d<=-3){down-=d;ref=e}} }
-    cu[i]=up;cd[i]=down;
+    cu[i]=up;
   }
   const eff=cum.map((d,i)=>d/1000+cu[i]/100); // effort-km: 1 km flat = 100 m of climbing
   const total=cum[cum.length-1];
-  return {name:name||'Trasa',pts,cum,cu,cd,eff,total,up,down,din:dinMs(total,up,down),hasEle:pts.some(p=>p.ele!=null)};
+  return {id:r.id,name:r.name,created:r.created,pts,cum,cu,eff,total,up,down,din:dinMs(total,up,down),hasEle:pts.some(p=>p.ele!=null)};
 }
 
 function project(rt,p,lastAlong){
@@ -334,27 +359,39 @@ function simplify(pts,maxN){
 }
 
 /* ---------- activity vs route ---------- */
-function interp(arr,cum,d){ // value of a cumulative array at distance d along the route
+function interp(arr,cum,d){
   let lo=0,hi=cum.length-1;if(d<=0)return arr[0];if(d>=cum[hi])return arr[hi];
   while(hi-lo>1){const m=(lo+hi)>>1;if(cum[m]<=d)lo=m;else hi=m}
   const f=(d-cum[lo])/((cum[hi]-cum[lo])||1);return arr[lo]+f*(arr[hi]-arr[lo]);
 }
 function splitStep(total){for(const s of [500,1000,2000,2500,5000,10000,20000])if(total/s<=8)return s;return 50000}
+// a series is [[metres along the route, ms since the route start], ...]
+function timeAtDist(series,D){if(!series||!series.length)return null;if(D<=series[0][0])return series[0][1];
+  for(let i=1;i<series.length;i++){if(series[i][0]>=D){const a=series[i-1],b=series[i];const f=b[0]>a[0]?(D-a[0])/(b[0]-a[0]):1;return a[1]+f*(b[1]-a[1])}}return null}
+function distAtTime(series,T){if(!series||!series.length)return 0;let best=0;
+  for(let i=0;i<series.length;i++){if(series[i][1]>=T){if(!i)return series[0][0];const a=series[i-1],b=series[i];const f=b[1]>a[1]?(T-a[1])/(b[1]-a[1]):1;return Math.max(best,a[0]+f*(b[0]-a[0]))}best=Math.max(best,series[i][0])}
+  return best}
+
 function analyze(rt,pts){
   const timed=pts.filter(p=>p.t);
-  if(timed.length<2) return {ok:false,msg:'Aktivnost nima časovnih podatkov, zato je ni mogoče primerjati.'};
+  if(timed.length<2) return {ok:false,msg:'Aktivnost nima časovnih podatkov.'};
   const rows=[];let along=0;
   for(const p of timed){const pr=project(rt,p,along);if(pr.off<=80){along=pr.along;rows.push({d:pr.along,t:p.t})}}
   if(rows.length<2) return {ok:false,msg:'Aktivnost ne poteka po tej trasi.'};
   const T=rt.total,nearStart=Math.min(150,T*0.1),nearEnd=Math.max(T-80,T*0.95);
   const k=rows.findIndex(r=>r.d>Math.min(300,T*0.2));
-  if(k<0) return {ok:false,msg:'Na trasi si prehodil premalo za primerjavo.'};
+  if(k<0) return {ok:false,msg:'Na tej trasi je prehojenega premalo.'};
   let s=-1;for(let i=k-1;i>=0;i--){if(rows[i].d<=nearStart){s=i;break}}
   if(s<0) return {ok:false,msg:'Aktivnost se ne začne na začetku te trase.'};
   const start=rows[s].t;
   const cross=B=>{for(let i=Math.max(s+1,1);i<rows.length;i++){if(rows[i].d>=B){const a=rows[i-1],b=rows[i];
     const f=b.d>a.d?(B-a.d)/(b.d-a.d):1;return a.t+Math.max(0,Math.min(1,f))*(b.t-a.t)}}return null};
   const fin=cross(nearEnd);
+  let endIdx=rows.length-1;if(fin!=null){for(let i=s;i<rows.length;i++){if(rows[i].t>=fin){endIdx=i;break}}}
+  // progress series for the ghost: monotonic in distance, at most ~300 points
+  const series=[];let maxD=0;const stepN=Math.max(1,Math.floor((endIdx-s)/300));
+  for(let i=s;i<=endIdx;i+=stepN){maxD=Math.max(maxD,rows[i].d);series.push([Math.round(maxD),rows[i].t-start])}
+  if(fin!=null)series.push([Math.round(T),fin-start]);
   const reached=Math.max(...rows.slice(s).map(r=>r.d));
   const step=splitStep(T),bounds=[];for(let b=step;b<T-step*0.3;b+=step)bounds.push(b);bounds.push(T);
   const effTot=rt.eff[rt.eff.length-1]||1e-9;
@@ -362,91 +399,43 @@ function analyze(rt,pts){
   for(const B of bounds){const tB=B===T?fin:cross(B);
     splits.push({a:prevB,b:B,up:interp(rt.cu,rt.cum,B)-interp(rt.cu,rt.cum,prevB),
       effShare:(interp(rt.eff,rt.cum,B)-interp(rt.eff,rt.cum,prevB))/effTot,
-      time:tB!=null&&prevT!=null?tB-prevT:null,at:tB!=null?tB-start:null});
+      time:tB!=null&&prevT!=null?tB-prevT:null});
     prevB=B;prevT=tB;}
-  return {ok:true,start,total:fin!=null?fin-start:null,done:fin!=null,reached,splits};
+  return {ok:true,start,total:fin!=null?fin-start:null,done:fin!=null,reached,splits,series};
 }
-function trackStats(pts){
-  let dist=0,up=0,down=0,ref=null;
-  for(let i=0;i<pts.length;i++){const p=pts[i];if(i)dist+=hav(pts[i-1],p);
-    if(p.ele!=null){if(ref==null)ref=p.ele;else{const d=p.ele-ref;if(d>=3){up+=d;ref=p.ele}else if(d<=-3){down-=d;ref=p.ele}}}}
-  const ts=pts.filter(p=>p.t).map(p=>p.t);
-  return {dist,up,down,start:ts.length?Math.min(...ts):Date.now(),dur:ts.length>1?Math.max(...ts)-Math.min(...ts):0};
+
+/* ---------- data ---------- */
+const routeCache=new Map(),resCache=new Map();
+function getRoutes(){return store.get(K.routes,[])}
+function routeById(id){if(!id)return null;if(routeCache.has(id))return routeCache.get(id);
+  const r=getRoutes().find(x=>x.id===id);if(!r)return null;const b=buildRoute(r);routeCache.set(id,b);return b}
+function activeRoute(){return routeById(store.get(K.active,null))}
+function getTracks(){return store.get(K.tracks,[])}
+function result(track,rt){const key=track.id+'|'+rt.id;if(resCache.has(key))return resCache.get(key);
+  const r=analyze(rt,track.pts.map(P));resCache.set(key,r);return r}
+function attemptsFor(rt){
+  return getTracks().map(t=>({t,r:result(t,rt)})).filter(o=>o.r.ok&&o.r.done).sort((a,b)=>a.r.total-b.r.total);
 }
-function watchIdFromGpx(text){const m=/<metadata>\s*<time>([^<]+)<\/time>/.exec(text);return m?m[1].replace(/[-:Z]/g,'').slice(0,15):null}
-function rememberWatchId(id){if(!id)return;const ids=store.get(K.watchIds,[]);if(!ids.includes(id)){ids.push(id);store.set(K.watchIds,ids)}}
-function importActivity(text,filename,opts={}){
-  const silent=!!opts.silent;
-  let g;try{g=parseGPX(text)}catch(e){if(!silent)toast(e.message);return null}
-  if(opts.watch) rememberWatchId(watchIdFromGpx(text));
-  if(!g.pts.some(p=>p.t)){if(!silent)toast('Ta .gpx nima časov. To je trasa, ne aktivnost; naloži jo pod »Trasa«.');return null}
-  const st=trackStats(g.pts);
-  const list=store.get(K.tracks,[]);
-  if(list.some(t=>t.start===st.start)){if(!silent){toast('Ta aktivnost je že uvožena.');openAnalysisById(String(st.start))}return null}
-  const dLbl=new Date(st.start).toLocaleDateString('sl-SI');
-  const name=opts.watch?`${g.name||'Aktivnost'} ${dLbl}`:(g.name||String(filename||'').replace(/\.gpx$/i,'')||`Aktivnost ${dLbl}`);
-  const rec={id:String(st.start),name,start:st.start,dur:st.dur,dist:st.dist,up:st.up,down:st.down,src:'ura',pts:g.pts.map(C)};
-  list.unshift(rec);list.sort((a,b)=>b.start-a.start);
-  if(!store.set(K.tracks,list)){toast('Za shranjevanje ni prostora. Izbriši starejše posnetke.');return null}
-  if($('#dlgTracks').open)fillTracks();
-  if(silent) return rec;
-  if(route) openAnalysis(rec); else toast(`Uvoženo: ${name}. Naloži traso pod »Trasa« za primerjavo časa.`);
-  return rec;
+function bestFor(rt){return attemptsFor(rt)[0]||null}
+// the saved routes this activity completed, the longest first
+function matchesFor(track){
+  return getRoutes().map(r=>routeById(r.id)).map(rt=>({rt,r:result(track,rt)})).filter(o=>o.r.ok&&o.r.done).sort((a,b)=>b.rt.total-a.rt.total);
 }
-window.planinaImport=importActivity;
-
-const signed=ms=>{const a=Math.abs(ms),s=Math.round(a/1000);const t=s<3600?`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`:dur(a,false);return (ms<0?'−':'+')+t};
-function showAn(){const d=$('#dlgAnalysis');if(!d.open)d.showModal()}
-function openAnalysisById(id){const t=store.get(K.tracks,[]).find(x=>x.id===id);if(t&&route)openAnalysis(t)}
-function openAnalysis(rec){
-  if(!route){toast('Najprej naloži traso pod »Trasa«.');return}
-  const res=analyze(route,rec.pts.map(P));
-  $('#anTitle').textContent=rec.name;
-  $('#anSub').textContent=`${new Date(rec.start).toLocaleString('sl-SI',{dateStyle:'medium',timeStyle:'short'})} · primerjava s traso ${route.name}`;
-  const box=$('#anStats');box.replaceChildren();$('#anTable').replaceChildren();$('#anNote').textContent='';
-  const v=$('#anVerdict');v.className='verdict';v.textContent='';
-  const card=(l,val,unit,cls)=>{const d=document.createElement('div');d.className='stat';const a=document.createElement('div');a.className='l';a.textContent=l;
-    const b=document.createElement('div');b.className='v'+(cls?' '+cls:'');b.textContent=val;if(unit){const s=document.createElement('small');s.textContent=unit;b.append(s)}d.append(a,b);box.append(d)};
-  if(!res.ok){v.textContent=res.msg;v.classList.add('bad');showAn();return}
-
-  // other attempts on this route, to compare against the best one
-  const others=store.get(K.tracks,[]).filter(t=>t.id!==rec.id).map(t=>({t,r:analyze(route,t.pts.map(P))})).filter(o=>o.r.ok&&o.r.done);
-  const best=others.reduce((b,o)=>!b||o.r.total<b.r.total?o:b,null);
-  const plan=target||route.din,planLbl=target?'ciljni čas':'ocena DIN';
-
-  if(res.done){
-    card('Čas na trasi',dur(res.total));
-    card(target?'Cilj':'Ocena DIN',dur(plan,false));
-    const dp=plan-res.total;card('Proti načrtu',signed(dp),'',dp>=0?'ok':'bad');
-    if(best){const db=best.r.total-res.total;card('Proti najboljšemu',signed(db),'',db>=0?'ok':'bad')}
-    else card('Poskusov',String(others.length+1));
-    const all=[res.total,...others.map(o=>o.r.total)].sort((a,b)=>a-b),rank=all.indexOf(res.total)+1;
-    if(others.length&&rank===1){v.textContent=`Najboljši čas na tej trasi, za ${dur(best.r.total-res.total)} hitreje od prejšnjega rekorda.`;v.classList.add('ok')}
-    else if(others.length){v.textContent=`${rank}. najboljši od ${all.length} poskusov na tej trasi.`}
-    else{v.textContent=dp>=0?`Za ${signed(dp).slice(1)} hitreje od načrta (${planLbl}).`:`Za ${signed(dp).slice(1)} počasneje od načrta (${planLbl}).`;v.classList.add(dp>=0?'ok':'bad')}
-  } else {
-    card('Prehojeno',km(res.reached),'km');card('Trasa',km(route.total),'km');
-    card('Opravljeno',String(Math.round(res.reached/route.total*100)),'%');
-    const last=res.splits.filter(s=>s.at!=null).pop();card('Čas do tam',last?dur(last.at,false):'–');
-    v.textContent='Trase nisi prehodil do konca, zato skupnega časa ni. Spodaj so časi odsekov, ki si jih opravil.';
+function saveRoute(name,pts){
+  const list=getRoutes();const r={id:'r'+Date.now().toString(36),name:name||'Trasa',created:Date.now(),pts:pts.map(C).map(a=>[a[0],a[1],a[2],null])};
+  list.push(r);if(!store.set(K.routes,list)){toast('Za novo traso ni prostora. Izbriši kakšno staro aktivnost.');return null}
+  store.set(K.active,r.id);return r;
+}
+function migrate(){
+  const old=store.get(K.oldRoute,null);
+  if(old&&old.pts&&old.pts.length>1&&!getRoutes().length){
+    const r={id:'r'+Date.now().toString(36),name:old.name||'Trasa',created:Date.now(),pts:old.pts};
+    if(store.set(K.routes,[r]))store.set(K.active,r.id);
   }
-
-  const tbl=$('#anTable');
-  const head=['Odsek (km)','Vzpon','Čas','Proti načrtu'];if(best)head.push('Proti najb.');
-  const thead=document.createElement('thead'),tr=document.createElement('tr');head.forEach(h=>{const th=document.createElement('th');th.textContent=h;tr.append(th)});thead.append(tr);tbl.append(thead);
-  const tb=document.createElement('tbody');
-  res.splits.forEach((s,i)=>{const r=document.createElement('tr');
-    const cells=[`${km(s.a)}–${km(s.b)}`,`${Math.round(s.up)} m`,s.time!=null?dur(s.time):'–'];
-    const td=(txt,cls)=>{const c=document.createElement('td');c.textContent=txt;if(cls)c.className=cls;return c};
-    cells.forEach(c=>r.append(td(c)));
-    if(s.time!=null){const d=plan*s.effShare-s.time;r.append(td(signed(d),d>=0?'ok':'bad'))}else r.append(td('–'));
-    if(best){const bs=best.r.splits[i];if(s.time!=null&&bs&&bs.time!=null){const d=bs.time-s.time;r.append(td(signed(d),d>=0?'ok':'bad'))}else r.append(td('–'))}
-    tb.append(r)});
-  tbl.append(tb);
-  $('#anNote').textContent=`Načrt za odseke je ${planLbl}, razdeljen po napornosti odseka (1 km ravnine šteje kot 100 m vzpona). Zeleno pomeni hitreje, oranžno počasneje.`+(best?` Najboljši poskus: ${new Date(best.t.start).toLocaleDateString('sl-SI')}, ${dur(best.r.total)}.`:'');
-  showAn();
+  store.del(K.oldRoute);store.del(K.oldTarget);
 }
 
+/* ---------- GPX out ---------- */
 const esc=s=>String(s).replace(/[<>&"']/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&apos;'}[c]));
 function toGPX(name,pts){
   const body=pts.map(p=>`      <trkpt lat="${p.lat.toFixed(7)}" lon="${p.lon.toFixed(7)}">${p.ele!=null?`<ele>${p.ele.toFixed(1)}</ele>`:''}${p.t?`<time>${new Date(p.t).toISOString()}</time>`:''}</trkpt>`).join('\n');
@@ -473,230 +462,324 @@ async function saveFile(filename,text){
 }
 const slug=s=>(s||'pot').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9]+/g,'-').replace(/^-|-$/g,'').toLowerCase()||'pot';
 
-/* ---------- state ---------- */
-let route=null,target=store.get(K.target,null),S=store.get(K.session,null),G=null;
-let watchId=null,wakeLock=null,lastFix=null,offWarned=false,saveT=0;
+/* ---------- importing activities ---------- */
+function watchIdFromGpx(text){const m=/<metadata>\s*<time>([^<]+)<\/time>/.exec(text);return m?m[1].replace(/[-:Z]/g,'').slice(0,15):null}
+function rememberWatchId(id){if(!id)return;const ids=store.get(K.watchIds,[]);if(!ids.includes(id)){ids.push(id);store.set(K.watchIds,ids)}}
+function trackStats(pts){
+  let dist=0,up=0,down=0,ref=null;
+  for(let i=0;i<pts.length;i++){const p=pts[i];if(i)dist+=hav(pts[i-1],p);
+    if(p.ele!=null){if(ref==null)ref=p.ele;else{const d=p.ele-ref;if(d>=3){up+=d;ref=p.ele}else if(d<=-3){down-=d;ref=p.ele}}}}
+  const ts=pts.filter(p=>p.t).map(p=>p.t);
+  return {dist,up,down,start:ts.length?Math.min(...ts):Date.now(),dur:ts.length>1?Math.max(...ts)-Math.min(...ts):0};
+}
+function addTrack(name,pts,src){
+  const st=trackStats(pts);const list=getTracks();
+  if(list.some(t=>t.start===st.start)) return {dup:list.find(t=>t.start===st.start)};
+  const rec={id:String(st.start),name,start:st.start,dur:st.dur,dist:st.dist,up:st.up,down:st.down,src,pts:pts.map(C)};
+  list.push(rec);list.sort((a,b)=>b.start-a.start);
+  let ok=store.set(K.tracks,list);
+  if(!ok) return {err:'Za shranjevanje ni prostora. Izbriši starejše aktivnosti.'};
+  return {rec};
+}
+function importActivity(text,filename,opts={}){
+  const silent=!!opts.silent;
+  let g;try{g=parseGPX(text)}catch(e){if(!silent)toast(e.message);return null}
+  if(opts.watch) rememberWatchId(watchIdFromGpx(text));
+  if(!g.pts.some(p=>p.t)){
+    if(!silent){ // no times: this is a route, not an activity
+      const r=saveRoute(g.name||String(filename||'').replace(/\.gpx$/i,''),g.pts);if(r){render();toast(`Datoteka nima časov, shranjena je kot trasa: ${r.name}`)}}
+    return null}
+  const dLbl=dstr(trackStats(g.pts).start);
+  const name=opts.watch?`${g.name||'Aktivnost'} ${dLbl}`:(g.name||String(filename||'').replace(/\.gpx$/i,'')||`Aktivnost ${dLbl}`);
+  const res=addTrack(name,g.pts,opts.watch?'ura':'datoteka');
+  if(res.err){if(!silent)toast(res.err);return null}
+  if(res.dup){if(!silent){toast('Ta aktivnost je že uvožena.');openActivity(res.dup)}return null}
+  if($('#dlgActs').open)fillActs();
+  render();
+  if(!silent) openActivity(res.rec);
+  return res.rec;
+}
+window.planinaImport=(t,f)=>importActivity(t,f);
 
-function css(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
-
-/* ---------- GPS status ---------- */
-function drawPos(p){const g=$('#gps');const acc=Math.round(p.acc||0);
-  g.className='gps '+(acc<=20?'good':'weak');
-  g.querySelector('span').textContent=`GPS natančnost ±${acc} m`+(p.ele!=null?` · višina ${Math.round(p.ele)} m`:'');}
-function gpsOff(){const g=$('#gps');g.className='gps';g.querySelector('span').textContent='GPS ni vklopljen'}
-
-/* ---------- GPS ---------- */
-function startWatch(){
+/* ---------- phone recording ---------- */
+let S=store.get(K.session,null),G=null,watchId=null,wakeLock=null,lastFix=null,offWarned=false,saveT=0;
+function startWatchPos(){
   if(!('geolocation' in navigator)){toast('Ta brskalnik ne podpira GPS-a.');return false}
   if(watchId!=null) return true;
-  watchId=navigator.geolocation.watchPosition(onPos,onPosErr,{enableHighAccuracy:true,maximumAge:0,timeout:30000});
+  watchId=navigator.geolocation.watchPosition(onPos,e=>{
+    if(e.code===1) toast('Dostop do lokacije je zavrnjen. Dovoli ga v nastavitvah.');
+    else if(e.code===3) toast('Čakam na signal GPS …'); else toast('GPS trenutno ni na voljo.');
+  },{enableHighAccuracy:true,maximumAge:0,timeout:30000});
   return true;
 }
-function stopWatch(){if(watchId!=null){navigator.geolocation.clearWatch(watchId);watchId=null}}
-function onPosErr(e){
-  if(e.code===1) toast('Dostop do lokacije je zavrnjen. Dovoli ga v nastavitvah brskalnika.');
-  else if(e.code===3) toast('Čakam na signal GPS …');
-  else toast('GPS trenutno ni na voljo.');
-}
+function stopWatchPos(){if(watchId!=null){navigator.geolocation.clearWatch(watchId);watchId=null}}
 function onPos(pos){
   const c=pos.coords;
   const p={lat:c.latitude,lon:c.longitude,ele:c.altitude==null?null:c.altitude,t:pos.timestamp||Date.now(),acc:c.accuracy};
-  lastFix=p;drawPos(p);
-  if(route){G=project(route,p,G?G.along:0);checkOff()}
+  lastFix=p;
+  const g=$('#gps');g.className='gps '+(p.acc<=20?'good':'weak');g.querySelector('span').textContent=`GPS ±${Math.round(p.acc)} m`;
+  const rt=activeRoute();
+  if(rt){G=project(rt,p,G?G.along:0);
+    const el=$('#offRoute');
+    if(G.off>60){el.hidden=false;el.textContent=`Odmik od trase: ${Math.round(G.off)} m`;
+      if(!offWarned&&S&&!S.paused){offWarned=true;try{navigator.vibrate&&navigator.vibrate([200,100,200])}catch(e){}}}
+    else{el.hidden=true;if(G.off<35)offWarned=false}}
   if(S&&!S.paused&&c.accuracy<=40){
     const last=S.pts.length?P(S.pts[S.pts.length-1]):null;
-    if(last){const d=hav(last,p);
-      if(d<4) {render();return}
-      if(d>400&&p.t-last.t<15000){render();return} // ignore GPS jumps
-      S.dist+=d}
-    if(p.ele!=null){ if(S.ref==null) S.ref=p.ele; else {const d=p.ele-S.ref; if(d>=5){S.up+=d;S.ref=p.ele} else if(d<=-5){S.down-=d;S.ref=p.ele}} }
+    if(last){const d=hav(last,p);if(d<4||(d>400&&p.t-last.t<15000)){render();return}S.dist+=d}
+    if(p.ele!=null){if(S.ref==null)S.ref=p.ele;else{const d=p.ele-S.ref;if(d>=5){S.up+=d;S.ref=p.ele}else if(d<=-5){S.ref=p.ele}}}
     S.pts.push(C(p));
     if(Date.now()-saveT>8000){saveT=Date.now();saveSession()}
   }
   render();
 }
-function checkOff(){
-  const el=$('#offRoute');
-  if(G.off>60){el.hidden=false;el.textContent=`Odmik od trase: ${Math.round(G.off)} m`;
-    if(!offWarned&&S&&!S.paused){offWarned=true;try{navigator.vibrate&&navigator.vibrate([200,100,200])}catch(e){}}}
-  else{el.hidden=true;if(G.off<35)offWarned=false}
-}
-function saveSession(){if(S&&!store.set(K.session,S))toast('Pomnilnik je poln. Izvozi in izbriši stare posnetke.')}
-
-/* ---------- wake lock ---------- */
+function saveSession(){if(S&&!store.set(K.session,S))toast('Pomnilnik je poln. Izbriši stare aktivnosti.')}
 async function wake(){try{if('wakeLock' in navigator&&!wakeLock){wakeLock=await navigator.wakeLock.request('screen');wakeLock.addEventListener('release',()=>wakeLock=null)}}catch(e){}}
 function unwake(){try{wakeLock&&wakeLock.release()}catch(e){}wakeLock=null}
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&S&&!S.paused)wake();if(document.visibilityState==='hidden')saveSession()});
 window.addEventListener('pagehide',saveSession);
-
-/* ---------- render ---------- */
 function elapsed(){if(!S)return 0;const now=S.paused?S.pauseAt:Date.now();return now-S.start-S.pausedMs}
-function setV(id,txt,unit,cls){const el=$(id);el.className='v'+(cls?' '+cls:'');el.textContent=txt;if(unit){const s=document.createElement('small');s.textContent=unit;el.appendChild(s)}}
+
+/* ---------- ghost line ---------- */
+function ghostLine(el){
+  el.replaceChildren();
+  const rail=h('div','rail'),done=h('div','done'),a=h('div','end a'),b=h('div','end b');
+  const gh=h('div','dot gh'),me=h('div','dot me'),tg=h('div','tag gh','Najboljši'),tm=h('div','tag me','Ti');
+  el.append(rail,done,a,b,gh,me,tg,tm);
+  return (meF,ghF)=>{
+    const m=Math.max(0,Math.min(1,meF)),g=ghF==null?null:Math.max(0,Math.min(1,ghF));
+    me.style.left=tm.style.left=(m*100)+'%';done.style.width=(m*100)+'%';
+    gh.hidden=tg.hidden=g==null;if(g!=null){gh.style.left=tg.style.left=(g*100)+'%'}
+  };
+}
+const liveGhost=ghostLine($('#liveGl'));
+
+/* ---------- main screen ---------- */
+function stat(l,v,unit,cls,sub){const d=h('div','stat');d.append(h('div','l',l));const b=h('div','v'+(cls?' '+cls:''),v);
+  if(unit)b.append(h('small',null,unit));d.append(b);if(sub)d.append(h('div','s',sub));return d}
 function render(){
-  const el=elapsed();
-  setV('#vTime',dur(el));
-  setV('#vDist',km(S?S.dist:0),'km');
-  setV('#vUp',String(Math.round(S?S.up:0)),'m');
-  const sp=S&&el>60000&&S.dist>50?(S.dist/1000)/(el/3600000):null;
-  setV('#vSpeed',sp?sp.toFixed(1).replace('.',','):'–','km/h');
+  const rt=activeRoute(),rec=!!S;
+  $('#emptyState').hidden=!!rt||rec;
+  $('#routeHead').hidden=!rt;
+  $('#gps').hidden=!rec;
+  $('#idleActions').hidden=rec;$('#recActions').hidden=!rec;
+  $('#btnWatch').hidden=!watchSupported();
+  $('#btnStart').classList.toggle('primary',!watchSupported());
+  $('#btnPause').textContent=S&&S.paused?'Nadaljuj':'Pavza';
+  if(!rt)$('#offRoute').hidden=true;
+  const box=$('#mainStats');box.replaceChildren();
+  let best=null;
+  if(rt){
+    $('#routeName').textContent=rt.name;
+    best=bestFor(rt);const n=attemptsFor(rt).length;
+    $('#routeMeta').textContent=`${km(rt.total)} km`+(rt.hasEle?` · ↑ ${Math.round(rt.up)} m`:'')+` · ${n} ${n===1?'poskus':n===2?'poskusa':n<5&&n>0?'poskusi':'poskusov'}`;
+  }
+  if(rec){
+    const el=elapsed();
+    box.append(stat('Čas',dur(el)));
+    if(rt){
+      const along=G?G.along:0;
+      box.append(stat('Do cilja',km(Math.max(0,rt.total-along)),'km'));
+      if(best){const tb=timeAtDist(best.r.series,along);const d=tb!=null&&G?tb-el:null;
+        box.append(stat('Proti najboljšemu',d==null?'–':signed(d),'',d==null?'':d>=0?'ok':'bad'));
+        $('#liveDelta').textContent=d==null?'':(d>=0?`${signed(d).slice(1)} pred njim`:`${signed(d).slice(1)} za njim`);
+        $('#liveDelta').className='delta'+(d==null?'':d>=0?' ok':' bad');
+        liveGhost(along/rt.total,distAtTime(best.r.series,el)/rt.total);
+      } else {
+        const effTot=rt.eff[rt.eff.length-1]||1;const plan=rt.din*(G?G.eff:0)/effTot;const d=G?plan-el:null;
+        box.append(stat('Proti oceni DIN',d==null?'–':signed(d),'',d==null?'':d>=0?'ok':'bad'));
+      }
+      box.append(stat('Razdalja',km(S.dist),'km'));
+    } else {
+      box.append(stat('Razdalja',km(S.dist),'km'),stat('Vzpon',String(Math.round(S.up)),'m'));
+    }
+    $('#liveGhost').hidden=!(rt&&best);
+    $('#hint').textContent=S.paused?'Snemanje je na pavzi.':'Aplikacija naj ostane odprta na zaslonu.';
+  } else {
+    $('#liveGhost').hidden=true;
+    if(rt){
+      if(best){box.append(stat('Najboljši čas',dur(best.r.total),'',null,dstr(best.t.start)))}
+      else box.append(stat('Ocena DIN',dur(rt.din,false),'',null,'še brez časa'));
+      const last=attemptsFor(rt).sort((a,b)=>b.t.start-a.t.start)[0];
+      if(last&&best&&last.t.id!==best.t.id){const d=best.r.total-last.r.total;box.append(stat('Zadnji poskus',dur(last.r.total),'',null,`${signed(d)} · ${dstr(last.t.start)}`))}
 
-  $('#btnStart').hidden=!!S&&!S.paused;
-  $('#btnStart').textContent=S&&S.paused?'Nadaljuj':'Začni';
-  $('#btnPause').hidden=!S||S.paused;
-  $('#btnFinish').hidden=!S;
-  $('#hint').textContent=S?(S.paused?'Snemanje je na pavzi. Čas ne teče.':'Snemam. Pusti aplikacijo odprto na zaslonu, ko je telefon zaklenjen, brskalnik lahko ustavi GPS.')
-    :(route?'Pritisni Začni, ko si na začetku trase.':'Naloži traso pod »Trasa« ali takoj začni snemati svojo pot.');
-
-  $('#routeStats').hidden=!route;
-  $('#routeLine').hidden=!route;
-  if(!route) {$('#offRoute').hidden=true;return}
-  const rl=$('#routeLine');rl.replaceChildren();
-  const b=document.createElement('b');b.textContent=route.name;rl.append(b);
-  const meta=document.createElement('span');
-  meta.textContent=`${km(route.total)} km`+(route.hasEle?` · ↑ ${Math.round(route.up)} m · ↓ ${Math.round(route.down)} m`:'')+` · ocena ${dur(route.din,false)} h`+(target?` · cilj ${dur(target,false)} h`:'');
-  rl.append(meta);
-
-  const effTot=route.eff[route.eff.length-1]||1e-9;
-  const along=G?G.along:0, effDone=G?G.eff:0;
-  setV('#vRemain',km(route.total-along),'km');
-  let rem;
-  if(S&&el>180000&&along>300&&effDone>0) rem=el*(effTot-effDone)/effDone; // your own pace so far
-  else rem=route.din*(1-effDone/effTot);
-  setV('#vEta',dur(rem,false));
-  setV('#vArrive',S||G?clock(Date.now()+rem):'–');
-  if(target&&S){const delta=target*effDone/effTot-el;const a=Math.abs(delta);
-    setV('#vPlan',(delta>=0?'+':'−')+(a<3600000?`${Math.floor(a/60000)}:${String(Math.floor(a%60000/1000)).padStart(2,'0')}`:dur(a,false)),'',delta>=0?'ok':'bad');
-    $('#vPlan').title=delta>=0?'pred načrtom':'za načrtom';
-  } else setV('#vPlan',target?dur(target,false):'–');
-  drawProfile(along);
+    }
+    $('#hint').textContent='';
+  }
 }
 
-function drawProfile(along){
-  const cv=$('#profile');if(!route||cv.offsetParent===null)return;
-  const dpr=window.devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;
-  if(cv.width!==Math.round(W*dpr)){cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr)}
-  const x=cv.getContext('2d');x.setTransform(dpr,0,0,dpr,0,0);x.clearRect(0,0,W,H);
-  const pts=route.pts,cum=route.cum,tot=route.total||1;
-  if(!route.hasEle){x.fillStyle=css('--muted');x.font='12px Inter,sans-serif';x.fillText('Trasa nima podatkov o višini.',0,16);return}
-  const eles=pts.map(p=>p.ele).filter(e=>e!=null);let mn=Math.min(...eles),mx=Math.max(...eles);if(mx-mn<20){mx+=10;mn-=10}
-  const top=14,bot=H-2,X=d=>d/tot*W,Y=e=>bot-(e-mn)/(mx-mn)*(bot-top);
-  const path=()=>{x.beginPath();let first=true;for(let i=0;i<pts.length;i++){if(pts[i].ele==null)continue;const px=X(cum[i]),py=Y(pts[i].ele);first?x.moveTo(px,py):x.lineTo(px,py);first=false}};
-  path();x.lineTo(W,bot);x.lineTo(0,bot);x.closePath();x.fillStyle=css('--line');x.fill();
-  x.save();x.beginPath();x.rect(0,0,X(along),H);x.clip();path();x.lineTo(W,bot);x.lineTo(0,bot);x.closePath();
-  x.globalAlpha=.35;x.fillStyle=css('--track');x.fill();x.restore();
-  path();x.strokeStyle=css('--muted');x.lineWidth=1.5;x.stroke();
-  x.fillStyle=css('--muted');x.font='11px Inter,sans-serif';x.textBaseline='top';
-  x.fillText(`${Math.round(mx)} m`,2,0);const lbl=`${Math.round(mn)} m`;x.textBaseline='bottom';x.fillText(lbl,2,bot-2);
-  if(G){let e=null;for(let i=0;i<cum.length;i++){if(cum[i]>=along&&pts[i].ele!=null){e=pts[i].ele;break}}
-    if(e!=null){x.beginPath();x.arc(X(along),Y(e),4.5,0,7);x.fillStyle=css('--track');x.fill();x.lineWidth=2;x.strokeStyle=css('--surface');x.stroke()}}
-}
-
-/* ---------- controls ---------- */
+/* ---------- recording controls ---------- */
 $('#btnStart').onclick=()=>{
-  if(S&&S.paused){S.pausedMs+=Date.now()-S.pauseAt;S.paused=false;S.pauseAt=null;saveSession();wake();render();return}
-  if(!startWatch())return;
-  S={start:Date.now(),paused:false,pauseAt:null,pausedMs:0,pts:[],dist:0,up:0,down:0,ref:null,routeName:route?route.name:null};
+  if(!startWatchPos())return;
+  const rt=activeRoute();
+  S={start:Date.now(),paused:false,pauseAt:null,pausedMs:0,pts:[],dist:0,up:0,ref:null,routeId:rt?rt.id:null};
+  G=lastFix&&rt?project(rt,lastFix,0):null;
   saveSession();wake();render();toast('Snemanje se je začelo. Čakam na GPS …');
 };
-$('#btnPause').onclick=()=>{if(!S)return;S.paused=true;S.pauseAt=Date.now();saveSession();unwake();render()};
+$('#btnPause').onclick=()=>{if(!S)return;
+  if(S.paused){S.pausedMs+=Date.now()-S.pauseAt;S.paused=false;S.pauseAt=null;wake()}else{S.paused=true;S.pauseAt=Date.now();unwake()}
+  saveSession();render()};
 $('#btnFinish').onclick=()=>{
   if(!S)return;if(!S.paused){S.paused=true;S.pauseAt=Date.now()}
-  $('#finishSum').textContent=`${km(S.dist)} km · ${dur(elapsed())} · ↑ ${Math.round(S.up)} m · ${S.pts.length} točk`;
-  const d=new Date(S.start);
-  $('#finishName').value=S.routeName||`Pot ${d.toLocaleDateString('sl-SI')}`;
-  disarm($('#fDiscard'),'Zavrzi');$('#dlgFinish').showModal();render();
+  $('#finishSum').textContent=`${km(S.dist)} km · ${dur(elapsed())} · ↑ ${Math.round(S.up)} m`;
+  $('#dlgFinish').showModal();render();
 };
-function finishSave(exp){
-  const name=$('#finishName').value.trim()||'Pot';
-  const rec={id:String(S.start),name,start:S.start,dur:elapsed(),dist:S.dist,up:S.up,down:S.down,pts:S.pts};
-  if(exp) saveFile(`${slug(name)}-${new Date(S.start).toISOString().slice(0,10)}.gpx`,toGPX(name,S.pts.map(P)));
-  const list=store.get(K.tracks,[]);list.unshift(rec);
-  let ok=store.set(K.tracks,list);
-  while(!ok&&list.length>1){list.pop();ok=store.set(K.tracks,list)}
-  if(!ok) toast(exp?'Izvoženo. Za shranjevanje v aplikaciji ni prostora.':'Ni prostora za shranjevanje. Raje izvozi .gpx.');
-  if(!ok&&!exp) return;
-  endSession();$('#dlgFinish').close();if(ok)toast(exp?'Shranjeno in izvoženo.':'Shranjeno pod Posnetki.');
-}
-function endSession(){S=null;G=route&&lastFix?project(route,lastFix,0):null;store.del(K.session);unwake();stopWatch();gpsOff();render()}
-$('#fSave').onclick=()=>finishSave(false);
-$('#fSaveExp').onclick=()=>finishSave(true);
-$('#fResume').onclick=()=>{$('#dlgFinish').close();$('#btnStart').click()};
-$('#fDiscard').onclick=e=>{const b=e.currentTarget;if(!b.dataset.armed){arm(b,'Res zavrzi?');return}endSession();$('#dlgFinish').close();toast('Posnetek zavržen.')};
-function arm(b,t){b.dataset.armed='1';b.classList.add('armed');b.textContent=t;clearTimeout(b._t);b._t=setTimeout(()=>disarm(b,b.dataset.label||'Izbriši'),4000)}
-function disarm(b,t){delete b.dataset.armed;b.classList.remove('armed');b.textContent=t}
+function endSession(){S=null;G=null;store.del(K.session);unwake();stopWatchPos();$('#offRoute').hidden=true;render()}
+$('#fSave').onclick=()=>{
+  const rt=routeById(S.routeId);
+  const name=`${rt?rt.name:'Pot'} ${dstr(S.start)}`;
+  if(S.pts.length<2){toast('Posnetek je prekratek.');return}
+  const res=addTrack(name,S.pts.map(P),'telefon');
+  if(res.err){toast(res.err);return}
+  endSession();$('#dlgFinish').close();
+  if(res.rec)openActivity(res.rec);
+};
+$('#fResume').onclick=()=>{$('#dlgFinish').close();$('#btnPause').click()};
+$('#fDiscard').onclick=e=>{if(!arm(e.currentTarget,'Res zavrzi?'))return;endSession();$('#dlgFinish').close();toast('Posnetek zavržen.')};
+$('#routeHead').onclick=()=>openRoutes();
 
-
-/* ---------- dialogs ---------- */
+/* ---------- dialogs: common ---------- */
 document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>b.closest('dialog').close());
 document.querySelectorAll('dialog').forEach(d=>d.addEventListener('click',e=>{if(e.target===d&&d.id!=='dlgFinish')d.close()}));
-
-$('#openRoute').onclick=()=>{fillRouteDlg();$('#dlgRoute').showModal()};
-function fillRouteDlg(){
-  $('#routeInfo').hidden=!route;$('#ambitSec').hidden=!route;$('#useDin').hidden=!route;
-  if(route) $('#routeInfoTxt').textContent=`${route.name}: ${km(route.total)} km, ${route.pts.length} točk`+(route.hasEle?`, vzpon ${Math.round(route.up)} m, spust ${Math.round(route.down)} m`:'')+`. Ocena hoje po DIN 33466: ${dur(route.din,false)} h.`;
-  $('#tH').value=target?Math.floor(target/3600000):'';$('#tM').value=target?Math.round(target%3600000/60000):'';
-  $('#ambitRes').textContent='';disarm($('#clearRoute'),'Odstrani traso');
+function show(d){if(!d.open)d.showModal()}
+function expandable(li,head,buildMore){
+  head.onclick=()=>{const open=li.querySelector('.more');if(open){open.remove();return}
+    li.parentElement.querySelectorAll('.more').forEach(m=>m.remove());const m=h('div','more');buildMore(m);li.append(m)};
 }
-$('#gpxIn').onchange=async e=>{
-  const f=e.target.files[0];if(!f)return;
-  try{const {name,pts}=parseGPX(await f.text());
-    route=buildRoute(name||f.name.replace(/\.gpx$/i,''),pts);G=lastFix?project(route,lastFix,0):null;
-    if(!store.set(K.route,{name:route.name,pts:pts.map(C)})) toast('Trasa je naložena, a je prevelika za trajno shranjevanje.');
-    else toast(`Naložena trasa: ${route.name}`);
-    if(S&&!S.routeName){S.routeName=route.name}
-    fillRouteDlg();render();
-  }catch(err){toast(err.message||'Datoteke ni mogoče prebrati.')}
-  e.target.value='';
-};
-$('#clearRoute').dataset.label='Odstrani traso';
-$('#clearRoute').onclick=e=>{const b=e.currentTarget;if(!b.dataset.armed){arm(b,'Res odstrani?');return}
-  route=null;G=null;store.del(K.route);fillRouteDlg();render();toast('Trasa odstranjena.')};
-$('#saveTarget').onclick=()=>{
-  const h=parseInt($('#tH').value||'0',10),m=parseInt($('#tM').value||'0',10);const ms=(h*60+m)*60000;
-  target=ms>0?ms:null;target?store.set(K.target,target):store.del(K.target);render();toast(target?`Ciljni čas: ${dur(target,false)} h`:'Ciljni čas odstranjen.');
-};
-$('#useDin').onclick=()=>{if(!route)return;const ms=Math.round(route.din/60000)*60000;$('#tH').value=Math.floor(ms/3600000);$('#tM').value=ms%3600000/60000};
-$('#ambitExport').onclick=()=>{
-  if(!route)return;const n=Math.max(10,Math.min(100,parseInt($('#ambitN').value||'90',10)));
-  const r=simplify(route.pts,n);
-  saveFile(`${slug(route.name)}-ambit.gpx`,toGPX(route.name,r.pts));
-  $('#ambitRes').textContent=r.eps?`Iz ${route.pts.length} točk je nastalo ${r.pts.length}. Največji odmik od izvirne trase je ${Math.round(r.eps)} m.`:`Trasa ima že samo ${r.pts.length} točk, izvožena je brez ločenih točk.`;
-};
+function renameRow(m,current,onSave){
+  const inp=h('input','txt');inp.value=current;inp.setAttribute('aria-label','Ime');
+  const ok=h('button','btn primary','Shrani');ok.onclick=()=>{const v=inp.value.trim();if(v)onSave(v)};
+  const r=h('div','row');r.append(ok);m.append(inp,r);setTimeout(()=>inp.focus(),30);
+}
 
-$('#actIn').onchange=async e=>{const f=e.target.files[0];if(!f)return;importActivity(await f.text(),f.name);e.target.value=''};
-$('#openTracks').onclick=()=>{$('#watchSec').hidden=!watchSupported();fillTracks();$('#dlgTracks').showModal()};
-function fillTracks(){
-  const list=store.get(K.tracks,[]),ul=$('#tracksList');ul.replaceChildren();$('#tracksEmpty').hidden=list.length>0;
-  list.forEach(t=>{
-    const li=document.createElement('li');
-    const n=document.createElement('div');n.className='t';n.textContent=t.name;
-    if(t.src==='ura'){const bd=document.createElement('span');bd.className='badge';bd.textContent='z ure';n.append(bd)}
-    const m=document.createElement('div');m.className='m';
-    m.textContent=`${new Date(t.start).toLocaleDateString('sl-SI')} · ${km(t.dist)} km · ${dur(t.dur)} · ↑ ${Math.round(t.up)} m`;
-    const row=document.createElement('div');row.className='row';
-    const b1=document.createElement('button');b1.className='btn';b1.textContent='Izvozi .gpx';
-    b1.onclick=()=>saveFile(`${slug(t.name)}-${new Date(t.start).toISOString().slice(0,10)}.gpx`,toGPX(t.name,t.pts.map(P)));
-    const b2=document.createElement('button');b2.className='btn';b2.textContent='Uporabi kot traso';
-    b2.onclick=()=>{const pts=t.pts.map(P).map(p=>({lat:p.lat,lon:p.lon,ele:p.ele}));if(pts.length<2){toast('Posnetek je prekratek.');return}
-      route=buildRoute(t.name,pts);store.set(K.route,{name:route.name,pts:pts.map(C)});
-      if(t.dur){target=t.dur;store.set(K.target,target)}
-      G=lastFix?project(route,lastFix,0):null;render();$('#dlgTracks').close();toast('Trasa nastavljena. Ciljni čas je tvoj prejšnji čas.')};
-    const b3=document.createElement('button');b3.className='btn danger';b3.textContent='Izbriši';b3.dataset.label='Izbriši';
-    b3.onclick=()=>{if(!b3.dataset.armed){arm(b3,'Res izbriši?');return}
-      store.set(K.tracks,store.get(K.tracks,[]).filter(x=>x.id!==t.id));fillTracks()};
-    const b0=document.createElement('button');b0.className='btn primary';b0.textContent='Analiza';
-    b0.onclick=()=>{if(!route){toast('Najprej naloži traso pod »Trasa«.');return}openAnalysis(t)};
-    row.append(b0,b1,b2,b3);li.append(n,m,row);ul.append(li);
+/* ---------- routes ---------- */
+function openRoutes(){fillRoutes();show($('#dlgRoutes'))}
+$('#openRoutes').onclick=openRoutes;
+function fillRoutes(){
+  const ul=$('#routesList');ul.replaceChildren();const list=getRoutes();const act=store.get(K.active,null);
+  $('#routesEmpty').hidden=list.length>0;
+  list.forEach(r=>{
+    const rt=routeById(r.id),best=bestFor(rt),n=attemptsFor(rt).length;
+    const li=h('li');const it=h('button','item'+(r.id===act?' active':''));
+    const body=h('span','body');body.append(h('span','t',r.name),h('span','m',`${km(rt.total)} km`+(rt.hasEle?` · ↑ ${Math.round(rt.up)} m`:'')+` · ${n}× prehojena`));
+    const right=h('span','r',best?dur(best.r.total,false):'–');right.append(h('small',null,best?'najboljši':'brez časa'));
+    it.append(body,right);li.append(it);ul.append(li);
+    expandable(li,it,m=>{
+      const row=h('div','row');
+      const bSel=h('button','btn primary',r.id===act?'Izbrana':'Izberi');bSel.onclick=()=>{store.set(K.active,r.id);G=null;render();$('#dlgRoutes').close()};
+      const bTimes=h('button','btn','Časi');bTimes.onclick=()=>openTimes(rt);
+      const bRen=h('button','btn','Preimenuj');bRen.onclick=()=>{m.replaceChildren();renameRow(m,r.name,v=>{const l=getRoutes();const x=l.find(y=>y.id===r.id);x.name=v;store.set(K.routes,l);routeCache.delete(r.id);fillRoutes();render()})};
+      const bAmb=h('button','btn','Za uro (.gpx)');bAmb.onclick=()=>{const s=simplify(rt.pts,90);saveFile(`${slug(r.name)}-ambit.gpx`,toGPX(r.name,s.pts.map(p=>({...p,t:null}))));
+        toast(s.eps?`Poenostavljeno na ${s.pts.length} točk (odmik do ${Math.round(s.eps)} m).`:'Izvoženo.')};
+      const bDel=h('button','btn danger','Izbriši');bDel.onclick=()=>{if(!arm(bDel,'Res izbriši?'))return;
+        store.set(K.routes,getRoutes().filter(y=>y.id!==r.id));routeCache.delete(r.id);if(store.get(K.active,null)===r.id){const l=getRoutes();store.set(K.active,l.length?l[0].id:null)}fillRoutes();render()};
+      row.append(bSel,bTimes,bRen,bAmb,bDel);m.append(row);
+      m.append(h('p','muted','»Za uro« pripravi traso za Suunto Ambit (največ 100 točk), ki jo uvoziš v aplikacijo Suunto.'));
+    });
   });
 }
+$('#routeIn').onchange=async e=>{const f=e.target.files[0];if(!f)return;
+  try{const g=parseGPX(await f.text());const r=saveRoute(g.name||f.name.replace(/\.gpx$/i,''),g.pts);if(r){toast(`Dodana trasa: ${r.name}`);fillRoutes();render()}}
+  catch(err){toast(err.message||'Datoteke ni mogoče prebrati.')}e.target.value=''};
 
-/* ---------- updates ---------- */
+function openTimes(rt){
+  const at=attemptsFor(rt);$('#timesTitle').textContent=rt.name;
+  $('#timesSub').textContent=at.length?`${at.length} ${at.length===1?'poskus':at.length===2?'poskusa':at.length<5?'poskusi':'poskusov'}, od najhitrejšega.`:'Na tej trasi še ni časov. Prenesi aktivnost z ure, ki jo prehodi od starta do cilja.';
+  const ul=$('#timesList');ul.replaceChildren();const best=at[0];
+  at.forEach((o,i)=>{const li=h('li');const it=h('button','item');
+    const body=h('span','body');body.append(h('span','t',`${i+1}. ${dstr(o.t.start)}`),h('span','m',i?`${signed(best.r.total-o.r.total)} za najboljšim`:'najboljši čas'));
+    const r=h('span','r'+(i?'':' best'),dur(o.r.total));it.append(body,r);it.onclick=()=>openAnalysis(o.t,rt);li.append(it);ul.append(li)});
+  show($('#dlgTimes'));
+}
+
+/* ---------- activities ---------- */
+function openActs(){$('#watchSec').hidden=!watchSupported();fillActs();show($('#dlgActs'))}
+$('#openActs').onclick=openActs;
+const srcLbl={ura:'ura',telefon:'telefon',datoteka:'datoteka'};
+function fillActs(){
+  const ul=$('#actsList');ul.replaceChildren();const list=getTracks();$('#actsEmpty').hidden=list.length>0;
+  list.forEach(t=>{
+    const mt=matchesFor(t)[0];
+    const li=h('li');const it=h('button','item');const body=h('span','body');const tt=h('span','t',t.name);
+    if(t.src&&srcLbl[t.src])tt.append(h('span','badge',srcLbl[t.src]));
+    body.append(tt,h('span','m',mt?`${mt.rt.name}`:`${km(t.dist)} km · ↑ ${Math.round(t.up)} m`));
+    const right=h('span','r',mt?dur(mt.r.total,false):dur(t.dur,false));right.append(h('small',null,mt?'na trasi':'skupaj'));
+    it.append(body,right);li.append(it);ul.append(li);
+    expandable(li,it,m=>{
+      const row=h('div','row');
+      if(mt){const b=h('button','btn primary','Analiza');b.onclick=()=>openAnalysis(t,mt.rt);row.append(b)}
+      const bSave=h('button','btn'+(mt?'':' primary'),'Shrani kot traso');
+      bSave.onclick=()=>{m.replaceChildren();m.append(h('p','muted','Ime nove trase:'));
+        renameRow(m,t.name.replace(/\s\d{1,2}\.\s?\d{1,2}\.\s?\d{4}$/,''),v=>{const r=saveRoute(v,t.pts.map(P));if(r){resCache.clear();toast(`Shranjena trasa: ${v}`);fillActs();render()}})};
+      const bExp=h('button','btn','Izvozi .gpx');bExp.onclick=()=>saveFile(`${slug(t.name)}.gpx`,toGPX(t.name,t.pts.map(P)));
+      const bDel=h('button','btn danger','Izbriši');bDel.onclick=()=>{if(!arm(bDel,'Res izbriši?'))return;
+        store.set(K.tracks,getTracks().filter(x=>x.id!==t.id));fillActs();render()};
+      row.append(bSave,bExp,bDel);m.append(row);
+      if(!mt)m.append(h('p','muted','Ta aktivnost ne prehodi nobene shranjene trase od starta do cilja. Če je to nova pot, jo shrani kot traso.'));
+    });
+  });
+}
+$('#actIn').onchange=async e=>{const f=e.target.files[0];if(!f)return;importActivity(await f.text(),f.name);e.target.value=''};
+function openActivity(t){const mt=matchesFor(t)[0];if(mt)openAnalysis(t,mt.rt);else{openActs();toast('Aktivnost ni na nobeni shranjeni trasi. Shraniš jo lahko kot novo traso.')}}
+
+/* ---------- analysis with ghost replay ---------- */
+const anGhost=ghostLine($('#anGl'));let anTimer=null;
+function openAnalysis(t,rt){
+  const res=result(t,rt);
+  $('#anTitle').textContent=rt.name;
+  $('#anSub').textContent=`${new Date(t.start).toLocaleString('sl-SI',{dateStyle:'medium',timeStyle:'short'})} · ${t.src==='ura'?'z ure':t.src==='telefon'?'s telefonom':'iz datoteke'}`;
+  const box=$('#anStats');box.replaceChildren();$('#anTable').replaceChildren();$('#anNote').textContent='';
+  const v=$('#anVerdict');v.className='verdict';v.textContent='';$('#anGhost').hidden=true;clearInterval(anTimer);
+  if(!res.ok){v.textContent=res.msg;v.classList.add('bad');show($('#dlgAnalysis'));return}
+  const at=attemptsFor(rt);const others=at.filter(o=>o.t.id!==t.id);const best=others[0]||null;
+  const planTotal=best?best.r.total:rt.din;
+  if(res.done){
+    box.append(stat('Čas',dur(res.total)));
+    if(best){const d=best.r.total-res.total;box.append(stat('Proti najboljšemu',signed(d),'',d>=0?'ok':'bad'))}
+    else{const d=rt.din-res.total;box.append(stat('Proti oceni DIN',signed(d),'',d>=0?'ok':'bad'))}
+    const rank=at.findIndex(o=>o.t.id===t.id)+1;
+    if(others.length&&rank===1){v.textContent=`Novi najboljši čas, ${dur(best.r.total-res.total)} hitreje od prejšnjega.`;v.classList.add('ok')}
+    else if(others.length){v.textContent=`${rank}. od ${at.length} poskusov.`}
+    else{v.textContent='Prvi čas na tej trasi. Naslednjič se boš meril z njim.'}
+  } else {
+    box.append(stat('Prehojeno',String(Math.round(res.reached/rt.total*100)),'%'),stat('Trasa',km(rt.total),'km'));
+    v.textContent='Trase nisi prehodil do konca. Spodaj so odseki, ki si jih opravil.';
+  }
+  // ghost replay against the best other attempt
+  if(best&&res.series.length>1){
+    $('#anGhost').hidden=false;
+    const endT=Math.max(res.series[res.series.length-1][1],best.r.series[best.r.series.length-1][1]);
+    const sl=$('#anSlider');
+    const draw=()=>{const T=endT*sl.value/1000;const me=distAtTime(res.series,T),gh=distAtTime(best.r.series,T);
+      anGhost(me/rt.total,gh/rt.total);$('#anT').textContent=dur(T);
+      const tb=timeAtDist(best.r.series,me),tm=timeAtDist(res.series,me);const d=tb!=null&&tm!=null?tb-tm:null;
+      const de=$('#anDelta');de.textContent=d==null||me<20?'':(d>=0?`${signed(d).slice(1)} pred najboljšim`:`${signed(d).slice(1)} za najboljšim`);de.className='delta'+(d==null?'':d>=0?' ok':' bad')};
+    sl.oninput=()=>{clearInterval(anTimer);$('#anPlay').textContent='▶';draw()};
+    $('#anPlay').onclick=()=>{if(anTimer){clearInterval(anTimer);anTimer=null;$('#anPlay').textContent='▶';return}
+      if(+sl.value>=1000)sl.value=0;$('#anPlay').textContent='❚❚';
+      anTimer=setInterval(()=>{sl.value=Math.min(1000,+sl.value+8);draw();if(+sl.value>=1000){clearInterval(anTimer);anTimer=null;$('#anPlay').textContent='▶'}},50)};
+    sl.value=1000;draw();
+  }
+  // splits
+  const tbl=$('#anTable');const head=['Odsek (km)','Vzpon','Čas',best?'Proti najb.':'Proti DIN'];
+  const thead=h('thead'),tr=h('tr');head.forEach(x=>tr.append(h('th',null,x)));thead.append(tr);tbl.append(thead);
+  const tb=h('tbody');
+  res.splits.forEach((s,i)=>{const r=h('tr');r.append(h('td',null,`${km(s.a)}–${km(s.b)}`),h('td',null,`${Math.round(s.up)} m`),h('td',null,s.time!=null?dur(s.time):'–'));
+    let ref=null;if(best){const bs=best.r.splits[i];ref=bs&&bs.time!=null?bs.time:null}else ref=planTotal*s.effShare;
+    if(s.time!=null&&ref!=null){const d=ref-s.time;r.append(h('td',d>=0?'ok':'bad',signed(d)))}else r.append(h('td',null,'–'));tb.append(r)});
+  tbl.append(tb);
+  $('#anNote').textContent=best?`Primerjava z najboljšim poskusom (${dstr(best.t.start)}, ${dur(best.r.total)}).`:'Ocena DIN 33466 je razdeljena po napornosti odsekov. Zeleno je hitreje, oranžno počasneje.';
+  show($('#dlgAnalysis'));
+}
+$('#dlgAnalysis').addEventListener('close',()=>{clearInterval(anTimer);anTimer=null;$('#anPlay').textContent='▶'});
+
+/* ---------- updates (Android) ---------- */
 const APP_VERSION=parseInt((document.querySelector('meta[name="planina-version"]')||{}).content||'0',10);
 const AND=window.PlaninaAndroid;
 function fillMenu(){
-  let t=`Verzija aplikacije: ${APP_VERSION}`;
+  let t=`Verzija ${APP_VERSION}`;
   if(AND&&AND.apkVersion){try{t+=` · Android ${AND.apkVersion()}`}catch(e){}}
-  $('#verTxt').textContent=t+(AND?'.':'. Spletna verzija se posodobi sama, ko stran osvežiš.');
+  $('#verTxt').textContent=t+(AND?'':' · spletna verzija se posodobi sama, ko stran osvežiš');
   $('#updRow').hidden=!AND;$('#apkSec').hidden=!AND;
 }
 function reloadApp(){saveSession();location.reload()}
@@ -707,10 +790,10 @@ window.planinaUpdateResult=(result,ver,manual)=>{
     else{$('#updTxt').textContent=`Nova verzija ${ver} je pripravljena.`;$('#updNotice').hidden=false}
   } else if(manual){
     st.textContent=result==='current'?`Imaš najnovejšo verzijo (${APP_VERSION}).`
-      :result==='offline'?'Ni povezave z GitHubom. Poskusi znova, ko boš na spletu.':'Posodobitve ni bilo mogoče prebrati. Poskusi kasneje.';
+      :result==='offline'?'Ni povezave z GitHubom. Poskusi znova, ko boš na spletu.':'Posodobitve ni bilo mogoče prebrati.';
   }
 };
-$('#openMenu').onclick=()=>{fillMenu();$('#updStatus').textContent='';$('#dlgMenu').showModal()};
+$('#openMenu').onclick=()=>{fillMenu();$('#updStatus').textContent='';show($('#dlgMenu'))};
 $('#checkUpd').onclick=()=>{$('#updStatus').textContent='Preverjam …';try{AND.checkUpdate(true)}catch(e){$('#updStatus').textContent='Posodobitev ni na voljo.'}};
 $('#updApply').onclick=reloadApp;
 if(AND&&AND.checkUpdate) setTimeout(()=>{try{AND.checkUpdate(false)}catch(e){}},2500);
@@ -718,16 +801,17 @@ if(AND&&AND.checkUpdate) setTimeout(()=>{try{AND.checkUpdate(false)}catch(e){}},
 /* ---------- Suunto Ambit over Bluetooth (Android) ---------- */
 let watchNew=[],watchBusy=false;
 const watchMsg={scanning:'Iščem uro … Na uri zdaj zaženi sinhronizacijo (»Sync now«).',
-  linking:'Ura je najdena, povezujem …',pairing:'Seznanjam. Potrdi na telefonu ali vpiši kodo, ki jo kaže ura.',
-  handshake:'Povezano, ura odgovarja …'};
+  linking:'Ura je najdena, povezujem …',pairing:'Seznanjam. Potrdi na telefonu ali vpiši kodo, ki jo kaže ura.',handshake:'Povezano, ura odgovarja …'};
 function watchSupported(){try{return !!(AND&&AND.watchConnect&&AND.watchAvailable())}catch(e){return false}}
 function setWatchStatus(t,cls){const el=$('#watchStatus');el.textContent=t;el.className='watchStatus'+(cls?' '+cls:'')}
-function setWatchBusy(b){watchBusy=b;const btn=$('#watchBtn');btn.textContent=b?'Prekliči':'Prenesi z ure (Bluetooth)';btn.classList.toggle('primary',!b)}
-$('#watchBtn').onclick=()=>{
+function setWatchBusy(b){watchBusy=b;const btn=$('#watchBtn');btn.textContent=b?'Prekliči':'Prenesi z ure';btn.classList.toggle('primary',!b)}
+function startWatch(){
   if(watchBusy){try{AND.watchCancel()}catch(e){}return}
   watchNew=[];setWatchBusy(true);setWatchStatus('Pripravljam Bluetooth …');
   try{AND.watchConnect(JSON.stringify(store.get(K.watchIds,[])))}catch(e){setWatchBusy(false);setWatchStatus('Povezava z uro ni na voljo.','bad')}
-};
+}
+$('#watchBtn').onclick=startWatch;
+$('#btnWatch').onclick=()=>{openActs();if(!watchBusy)startWatch()};
 window.planinaWatch=(type,data)=>{
   if(type==='status'){setWatchStatus(watchMsg[data]||data)}
   else if(type==='connected'){setWatchStatus(`Povezan z uro ${data}.`)}
@@ -735,24 +819,20 @@ window.planinaWatch=(type,data)=>{
   else if(type==='progress'){setWatchStatus(`Prenašam aktivnosti z ure: ${data}`)}
   else if(type==='gpx'){const rec=importActivity(data,'',{silent:true,watch:true});if(rec)watchNew.push(rec)}
   else if(type==='done'){
-    setWatchBusy(false);
-    const n=watchNew.length;
+    setWatchBusy(false);const n=watchNew.length;
     setWatchStatus(n?`Prenos končan: ${n} ${n===1?'nova aktivnost':n===2?'novi aktivnosti':n<5?'nove aktivnosti':'novih aktivnosti'}.`:'Prenos končan. Na uri ni novih aktivnosti.','ok');
-    if($('#dlgTracks').open)fillTracks();
-    if(n&&route){const last=watchNew.reduce((a,b)=>a.start>b.start?a:b);openAnalysis(last)}
+    fillActs();render();
+    if(n){const last=watchNew.reduce((a,b)=>a.start>b.start?a:b);const mt=matchesFor(last)[0];if(mt)openAnalysis(last,mt.rt)}
   }
   else if(type==='error'){setWatchBusy(false);setWatchStatus(data,'bad')}
-  else if(type==='disconnected'){if(watchBusy){setWatchBusy(false);if(!$('#watchStatus').classList.contains('ok'))setWatchStatus('Povezava z uro je prekinjena.','bad')}}
+  else if(type==='disconnected'){if(watchBusy){setWatchBusy(false);setWatchStatus('Povezava z uro je prekinjena.','bad')}}
 };
 
 /* ---------- boot ---------- */
-const saved=store.get(K.route,null);
-if(saved&&saved.pts&&saved.pts.length>1){route=buildRoute(saved.name,saved.pts.map(P))}
-if(S){
-  if(!S.paused){startWatch();wake();toast('Snemanje se nadaljuje.')}}
+migrate();
+if(S){if(!S.paused){startWatchPos();wake();toast('Snemanje se nadaljuje.')}}
 render();
-setInterval(render,1000);
-window.addEventListener('resize',()=>route&&drawProfile(G?G.along:0));
+setInterval(()=>{if(S)render()},1000);
 </script>
 </body>
 </html>

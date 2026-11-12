@@ -24,7 +24,9 @@
 
 #include <ctype.h>
 #include <errno.h>
+#ifndef __ANDROID__
 #include <iconv.h>
+#endif
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -154,6 +156,50 @@ int libambit_htob(const char *hex_string, uint8_t *binary, size_t binary_size)
     return i;
 }
 
+#ifdef __ANDROID__
+/* Android has iconv only from API 28 and the app supports API 26, so convert by hand.
+ * libambit only asks for ASCII/UTF-8 (copied as is, up to the first NUL) and WCHAR_T. */
+static size_t put_utf8(char *o, uint32_t c)
+{
+    if (c < 0x80) { o[0] = (char)c; return 1; }
+    if (c < 0x800) { o[0] = (char)(0xC0 | (c >> 6)); o[1] = (char)(0x80 | (c & 0x3F)); return 2; }
+    if (c < 0x10000) { o[0] = (char)(0xE0 | (c >> 12)); o[1] = (char)(0x80 | ((c >> 6) & 0x3F));
+        o[2] = (char)(0x80 | (c & 0x3F)); return 3; }
+    if (c > 0x10FFFF) return put_utf8(o, 0xFFFD);
+    o[0] = (char)(0xF0 | (c >> 18)); o[1] = (char)(0x80 | ((c >> 12) & 0x3F));
+    o[2] = (char)(0x80 | ((c >> 6) & 0x3F)); o[3] = (char)(0x80 | (c & 0x3F)); return 4;
+}
+
+char * utf8memconv(const char *src, size_t n, const char *encoding)
+{
+    char *rv, *o;
+
+    if (!src) {
+        return NULL;
+    }
+    rv = (char *)malloc(n * 4 + 1);
+    if (!rv) {
+        return NULL;
+    }
+    o = rv;
+    if (encoding && strcmp(encoding, "WCHAR_T") == 0) {
+        const wchar_t *w = (const wchar_t *)src;
+        size_t i, count = n / sizeof(wchar_t);
+        for (i = 0; i < count && w[i] != 0; i++) {
+            o += put_utf8(o, (uint32_t)w[i]);
+        }
+    }
+    else {
+        size_t i;
+        for (i = 0; i < n && src[i] != '\0'; i++) {
+            *o++ = src[i];
+        }
+    }
+    *o = '\0';
+    o = realloc(rv, strlen(rv) + 1);
+    return o ? o : rv;
+}
+#else
 char * utf8memconv(const char *src, size_t n, const char *encoding)
 {
     char *rv = NULL;
@@ -196,6 +242,7 @@ char * utf8memconv(const char *src, size_t n, const char *encoding)
 
     return rv;
 }
+#endif
 
 char * utf8wcsconv(const wchar_t *src)
 {

@@ -864,6 +864,17 @@ static void log_push_callback(void *userdata, ambit_log_entry_t *log_entry)
     // Ne pas libérer ici : device_driver_ambit.c appelle libambit_log_entry_free après push_cb
 }
 
+// Progress of libambit_log_read, polled from the UI thread by nativeAmbitLogProgress.
+static volatile int g_prog_total = 0;
+static volatile int g_prog_current = 0;
+
+static void log_progress_callback(void *userdata, uint16_t log_count, uint16_t log_current, uint8_t percent)
+{
+    (void)userdata; (void)percent;
+    g_prog_total = log_count;
+    g_prog_current = log_current;
+}
+
 static int log_skip_callback(void *userdata, ambit_log_header_t *log_header)
 {
     (void)userdata;
@@ -996,10 +1007,12 @@ Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitGetLogCount(
     g_log_cache.clear();
     g_log_fit_b64.clear();
     g_log_dates.clear();
+    g_prog_total = 0;
+    g_prog_current = 0;
     int ret = libambit_log_read(g_device,
                                 log_skip_callback,
                                 log_push_callback,
-                                nullptr,   // progress_callback
+                                log_progress_callback,
                                 nullptr);  // userdata
     if (ret < 0) {
         LOGE("libambit_log_read failed: %d", ret);
@@ -1007,6 +1020,17 @@ Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitGetLogCount(
     }
     LOGI("nativeAmbitGetLogCount: %zu logs lus", g_log_cache.size());
     return (jint)g_log_cache.size();
+}
+
+/** {moves walked, moves on the watch, moves read so far} of the running nativeAmbitGetLogCount. */
+JNIEXPORT jintArray JNICALL
+Java_com_ambitsyncmodern_usb_AmbitUsbModule_nativeAmbitLogProgress(
+        JNIEnv *env, jobject /* thiz */)
+{
+    jint v[3] = { g_prog_current, g_prog_total, 0 };
+    jintArray a = env->NewIntArray(3);
+    if (a) env->SetIntArrayRegion(a, 0, 3, v);
+    return a;
 }
 
 /**

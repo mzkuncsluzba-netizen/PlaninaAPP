@@ -12,6 +12,8 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.WindowManager;
 import android.webkit.GeolocationPermissions;
 import android.webkit.JavascriptInterface;
@@ -375,12 +377,34 @@ public class MainActivity extends Activity {
         if (watchSyncing || watch == null || !watch.isLive()) return;
         watchSyncing = true;
         watchEvent("syncing", "");
+        // Reading every move over Bluetooth is slow (minutes on the first sync), so show what is
+        // happening once a second: which move, out of how many, and the time spent so far.
+        final long t0 = System.currentTimeMillis();
+        final Handler ticker = new Handler(Looper.getMainLooper());
+        final boolean[] reading = {true};
+        ticker.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (!reading[0]) return;
+                int cur = 0, total = 0;
+                try { int[] p = watchData.nativeAmbitLogProgress(); if (p != null && p.length >= 2) { cur = p[0]; total = p[1]; } }
+                catch (Throwable ignored) { }
+                long s = (System.currentTimeMillis() - t0) / 1000;
+                String time = (s / 60) + ":" + (s % 60 < 10 ? "0" : "") + (s % 60);
+                String what = total > 0
+                        ? "Berem z ure: aktivnost " + Math.min(cur + 1, total) + " od " + total
+                        : "Berem seznam aktivnosti z ure";
+                watchEvent("status", what + " (" + time + "). Prvi prenos lahko traja dlje, ura naj bo blizu telefona.");
+                ticker.postDelayed(this, 1000);
+            }
+        }, 1000);
         watchExec.execute(() -> {
             int imported = 0;
             boolean lock = false;
             try {
                 try { lock = watchData.nativeAmbitSyncDisplay(true); } catch (Throwable ignored) { }
-                int n = watchData.nativeAmbitGetLogCount(watchKnownIds);
+                int n;
+                try { n = watchData.nativeAmbitGetLogCount(watchKnownIds); }
+                finally { runOnUiThread(() -> reading[0] = false); }
                 if (n < 0) {
                     watchEvent("error", "Branje z ure ni uspelo. Poskusi znova.");
                 } else {

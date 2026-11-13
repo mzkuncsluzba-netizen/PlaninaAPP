@@ -17,6 +17,9 @@ public final class AmbitUsbModule {
     /** Reads every move not listed in knownDates ("YYYYMMDDTHHMMSS") into a native cache. -1 = not connected. */
     public native int nativeAmbitGetLogCount(String[] knownDates);
 
+    /** {moves walked, moves on the watch, unused} while nativeAmbitGetLogCount runs. Safe from any thread. */
+    public native int[] nativeAmbitLogProgress();
+
     /** GPX of move #index from the cache filled by nativeAmbitGetLogCount. */
     public native String nativeAmbitGetLogAsGpx(int index);
 

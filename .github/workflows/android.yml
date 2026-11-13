@@ -28,8 +28,21 @@ jobs:
           mkdir -p android/app/src/main/assets
           cp index.html android/app/src/main/assets/index.html
 
+      - name: Signing key from secret
+        env:
+          PLANINA_KEYSTORE: ${{ secrets.PLANINA_KEYSTORE }}
+        run: |
+          if [ -n "$PLANINA_KEYSTORE" ]; then
+            echo "$PLANINA_KEYSTORE" | base64 -d > android/app/planina.keystore
+            echo "Fixed signing key in use."
+          else
+            echo "::warning::PLANINA_KEYSTORE secret is missing - APK is signed with a throwaway key and will not install over the previous one."
+          fi
+
       - name: Build APK
         working-directory: android
+        env:
+          PLANINA_KEY_PASSWORD: ${{ secrets.PLANINA_KEY_PASSWORD }}
         run: gradle --no-daemon assembleDebug
 
       - name: Rename APK

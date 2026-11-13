@@ -20,21 +20,24 @@ android {
     }
 
     // One fixed key for every build, so a new APK installs over the old one (and the app can
-    // update itself). Without it each GitHub build made its own debug key and Android refused
-    // the update. The key is in the repo on purpose: the app only ever installs updates it
-    // downloads from this repository's own releases.
+    // update itself). Without it each GitHub build makes its own debug key and Android refuses
+    // the update. The key is not in the repo: the workflow writes it from the PLANINA_KEYSTORE
+    // secret. Without the secret the build still works, just with a throwaway debug key.
+    def planinaKey = file('planina.keystore')
     signingConfigs {
         planina {
-            storeFile file('planina.keystore')
+            storeFile planinaKey
             storeType 'pkcs12'
-            storePassword 'planinaapp'
+            storePassword System.getenv('PLANINA_KEY_PASSWORD') ?: 'planinaapp'
             keyAlias 'planina'
-            keyPassword 'planinaapp'
+            keyPassword System.getenv('PLANINA_KEY_PASSWORD') ?: 'planinaapp'
         }
     }
     buildTypes {
-        debug { signingConfig signingConfigs.planina }
-        release { signingConfig signingConfigs.planina }
+        if (planinaKey.exists()) {
+            debug { signingConfig signingConfigs.planina }
+            release { signingConfig signingConfigs.planina }
+        }
     }
 
     externalNativeBuild {

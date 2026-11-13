@@ -34,7 +34,8 @@ jobs:
         run: |
           if [ -n "$PLANINA_KEYSTORE" ]; then
             clean=$(printf '%s' "$PLANINA_KEYSTORE" | tr -d ' \t\r\n')
-            echo "Secret length: ${#clean} characters (expected about 3156)."
+            bad=$(printf '%s' "$clean" | tr -d 'A-Za-z0-9+/=' | wc -c)
+            echo "::warning::Key check: ${#clean} characters (expected 3156), ${bad} not base64, starts with MII: $([ "${clean:0:3}" = MII ] && echo yes || echo no)"
             if ! printf '%s' "$clean" | base64 -d > android/app/planina.keystore; then
               echo "::error::PLANINA_KEYSTORE is not valid base64 - paste the key again."
               exit 1

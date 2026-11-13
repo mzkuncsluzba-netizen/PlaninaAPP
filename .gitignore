@@ -4,3 +4,4 @@ android/.gradle/
 android/app/src/main/assets/
 *.keystore
 *.jks
+android/app/KLJUC-za-GitHub-secret.txt

@@ -5,7 +5,9 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.location.LocationManager;
 import android.provider.OpenableColumns;
+import android.provider.Settings;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
@@ -338,8 +340,11 @@ public class MainActivity extends Activity {
         }
     }
 
+    // BLUETOOTH_SCAN is declared without "neverForLocation", so Android only hands over scan
+    // results when location is granted too (and on every version, when location is switched on).
     private String[] blePermissions() {
-        if (Build.VERSION.SDK_INT >= 31) return new String[]{"android.permission.BLUETOOTH_SCAN", "android.permission.BLUETOOTH_CONNECT"};
+        if (Build.VERSION.SDK_INT >= 31) return new String[]{"android.permission.BLUETOOTH_SCAN",
+                "android.permission.BLUETOOTH_CONNECT", Manifest.permission.ACCESS_FINE_LOCATION};
         return new String[]{Manifest.permission.ACCESS_FINE_LOCATION};
     }
 
@@ -348,9 +353,21 @@ public class MainActivity extends Activity {
         return true;
     }
 
+    private boolean locationOn() {
+        LocationManager lm = (LocationManager) getSystemService(LOCATION_SERVICE);
+        if (lm == null) return true;
+        if (Build.VERSION.SDK_INT >= 28) return lm.isLocationEnabled();
+        return lm.isProviderEnabled(LocationManager.GPS_PROVIDER) || lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+    }
+
     private void watchConnect() {
         if (!ensureWatch()) return;
         if (!hasBlePermissions()) { requestPermissions(blePermissions(), REQ_BLE); return; }
+        if (!locationOn()) {
+            watchEvent("error", "Vklopi lokacijo na telefonu, sicer Android ure ne najde. Nato pritisni »Prenesi z ure« znova.");
+            try { startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)); } catch (Exception ignored) { }
+            return;
+        }
         watch.scanAndConnect();
     }
 
@@ -461,7 +478,7 @@ public class MainActivity extends Activity {
             geoCallback = null;
         } else if (req == REQ_BLE) {
             if (hasBlePermissions()) watchConnect();
-            else watchEvent("error", "Brez dovoljenja za Bluetooth se z uro ne morem povezati.");
+            else watchEvent("error", "Za iskanje ure dovoli »Naprave v bližini« in »Lokacija« (Nastavitve → Aplikacije → PlaninaAPP → Dovoljenja).");
         }
     }
 

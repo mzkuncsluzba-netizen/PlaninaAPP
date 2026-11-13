@@ -153,7 +153,7 @@ public final class AmbitBleModule {
         };
         scanTimeout = () -> {
             stopScan();
-            fail("SCAN_TIMEOUT", "Ure nisem našel. Na uri izberi »Sync now« tik preden pritisneš Poveži.");
+            fail("SCAN_TIMEOUT", "Ure nisem našel. Pritisni »Prenesi z ure« in nato v 30 sekundah na uri izberi »Sync now« (prvič »Pair MobileApp«). Aplikacija Suunto naj bo ustavljena.");
         };
         main.postDelayed(scanTimeout, SCAN_TIMEOUT_MS);
         try {

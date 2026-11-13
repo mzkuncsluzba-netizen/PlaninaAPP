@@ -2,7 +2,13 @@ package si.planina.app;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.location.LocationManager;
@@ -135,6 +141,7 @@ public class MainActivity extends Activity {
         });
 
         web.addJavascriptInterface(new Bridge(), "PlaninaAndroid");
+        registerInstallReceiver();
 
         if (saved != null) web.restoreState(saved);
         else web.loadUrl(START);
@@ -309,6 +316,159 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /* ---------- in-app APK updates: the newest GitHub release is downloaded and installed ---------- */
+    private static final String RELEASE_API = "https://api.github.com/repos/mzkuncsluzba-netizen/PlaninaAPP/releases/latest";
+    private static final String APK_URL = "https://github.com/mzkuncsluzba-netizen/PlaninaAPP/releases/download/v%d/PlaninaAPP.apk";
+    private static final String ACTION_INSTALLED = "si.planina.app.APK_INSTALLED";
+    private volatile int apkLatest = 0;
+    private volatile boolean apkBusy = false;
+    private boolean apkWaitingForPermission = false;
+    private BroadcastReceiver installReceiver;
+
+    private void apkEvent(String type, String data) {
+        final String js = "window.planinaApk&&window.planinaApk(" + JSONObject.quote(type) + ","
+                + JSONObject.quote(data == null ? "" : data) + ")";
+        runOnUiThread(() -> web.evaluateJavascript(js, null));
+    }
+
+    private int installedVersionCode() {
+        try {
+            PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return Build.VERSION.SDK_INT >= 28 ? (int) pi.getLongVersionCode() : pi.versionCode;
+        } catch (Exception e) { return 0; }
+    }
+
+    /** Asks GitHub for the newest release (tag "v<build number>") and tells the page whether it is newer. */
+    private void checkApk(final boolean manual) {
+        new Thread(() -> {
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL(RELEASE_API).openConnection();
+                c.setRequestProperty("Accept", "application/vnd.github+json");
+                c.setUseCaches(false);
+                c.setConnectTimeout(10000);
+                c.setReadTimeout(20000);
+                if (c.getResponseCode() != 200) throw new Exception("HTTP " + c.getResponseCode());
+                String body;
+                try (InputStream in = c.getInputStream()) { body = readAll(in); }
+                String tag = new JSONObject(body).optString("tag_name", "");
+                int latest = Integer.parseInt(tag.replaceAll("\\D", ""));
+                apkLatest = latest;
+                if (latest > installedVersionCode()) apkEvent("available", String.valueOf(latest));
+                else if (manual) apkEvent("current", String.valueOf(installedVersionCode()));
+            } catch (Exception e) {
+                if (manual) apkEvent("offline", "");
+            }
+        }).start();
+    }
+
+    private void installApk() {
+        if (apkBusy) return;
+        if (apkLatest <= 0) { checkApk(true); return; }
+        if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+            apkWaitingForPermission = true;
+            apkEvent("permission", "");
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + getPackageName())));
+            } catch (Exception ignored) { }
+            return;
+        }
+        apkBusy = true;
+        final int ver = apkLatest;
+        new Thread(() -> {
+            File apk = new File(getCacheDir(), "PlaninaAPP.apk");
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL(String.format(java.util.Locale.ROOT, APK_URL, ver)).openConnection();
+                c.setInstanceFollowRedirects(true);
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(30000);
+                if (c.getResponseCode() != 200) throw new Exception("HTTP " + c.getResponseCode());
+                long total = c.getContentLengthLong();
+                long done = 0;
+                int lastPct = -1;
+                try (InputStream in = c.getInputStream(); OutputStream os = new FileOutputStream(apk)) {
+                    byte[] b = new byte[65536];
+                    int n;
+                    while ((n = in.read(b)) > 0) {
+                        os.write(b, 0, n);
+                        done += n;
+                        int pct = total > 0 ? (int) (done * 100 / total) : -1;
+                        if (pct != lastPct) { lastPct = pct; apkEvent("downloading", pct >= 0 ? String.valueOf(pct) : ""); }
+                    }
+                }
+                if (total > 0 && done != total) throw new Exception("prekinjen prenos");
+
+                apkEvent("installing", "");
+                PackageInstaller pi = getPackageManager().getPackageInstaller();
+                PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
+                params.setAppPackageName(getPackageName());
+                if (Build.VERSION.SDK_INT >= 31) params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED);
+                int id = pi.createSession(params);
+                try (PackageInstaller.Session s = pi.openSession(id)) {
+                    try (InputStream in = new FileInputStream(apk); OutputStream os = s.openWrite("PlaninaAPP.apk", 0, apk.length())) {
+                        byte[] b = new byte[65536];
+                        int n;
+                        while ((n = in.read(b)) > 0) os.write(b, 0, n);
+                        s.fsync(os);
+                    }
+                    Intent done2 = new Intent(ACTION_INSTALLED).setPackage(getPackageName());
+                    int flags = PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0);
+                    PendingIntent p = PendingIntent.getBroadcast(this, id, done2, flags);
+                    s.commit(p.getIntentSender());
+                }
+            } catch (Exception e) {
+                apkBusy = false;
+                apkEvent("error", "Posodobitve ni bilo mogoče prenesti: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    /** Result of the install session: Android first asks the user to confirm, then reports the outcome. */
+    private void registerInstallReceiver() {
+        installReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context ctx, Intent i) {
+                int status = i.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
+                if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+                    Intent confirm = i.getParcelableExtra(Intent.EXTRA_INTENT);
+                    if (confirm != null) {
+                        confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        try { startActivity(confirm); } catch (Exception ignored) { }
+                    }
+                    apkEvent("confirm", "");
+                } else if (status == PackageInstaller.STATUS_SUCCESS) {
+                    apkBusy = false;
+                    apkEvent("done", "");
+                } else {
+                    apkBusy = false;
+                    String msg = i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
+                    apkEvent(status == PackageInstaller.STATUS_FAILURE_ABORTED ? "cancelled" : "error",
+                            status == PackageInstaller.STATUS_FAILURE_CONFLICT || status == PackageInstaller.STATUS_FAILURE_INCOMPATIBLE
+                                    ? "Nova verzija je podpisana drugače kot nameščena. Enkrat jo namesti ročno z GitHuba (staro prej odstrani)."
+                                    : "Namestitev ni uspela" + (msg != null ? ": " + msg : "."));
+                }
+            }
+        };
+        IntentFilter f = new IntentFilter(ACTION_INSTALLED);
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(installReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(installReceiver, f);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (apkWaitingForPermission) {
+            apkWaitingForPermission = false;
+            if (Build.VERSION.SDK_INT < 26 || getPackageManager().canRequestPackageInstalls()) installApk();
+            else apkEvent("error", "Brez dovoljenja »Nameščanje neznanih aplikacij« se aplikacija ne more posodobiti sama.");
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (installReceiver != null) { try { unregisterReceiver(installReceiver); } catch (Exception ignored) { } }
+        super.onDestroy();
+    }
+
     /* ---------- Suunto Ambit over Bluetooth (protocol from Sommet, GPLv3) ---------- */
     private AmbitBleModule watch;
     private AmbitUsbModule watchData;
@@ -450,6 +610,12 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void checkUpdate(boolean manual) { MainActivity.this.checkUpdate(manual); }
+
+        @JavascriptInterface
+        public void checkApk(boolean manual) { MainActivity.this.checkApk(manual); }
+
+        @JavascriptInterface
+        public void installApk() { runOnUiThread(MainActivity.this::installApk); }
 
         @JavascriptInterface
         public String apkVersion() {

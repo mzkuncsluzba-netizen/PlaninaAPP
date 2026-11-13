@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>PlaninaAPP</title>
 <!-- Raise this number with every change, so the Android app offers the update. -->
-<meta name="planina-version" content="8">
+<meta name="planina-version" content="9">
 <meta name="theme-color" content="#c8102e">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -161,6 +161,7 @@ dialog::backdrop{background:rgba(10,14,11,.5)}
 
 <main class="panel">
   <div class="notice" id="updNotice" hidden><span id="updTxt"></span><button class="btn" id="updApply">Uporabi zdaj</button></div>
+  <div class="notice" id="apkNotice" hidden><span id="apkTxt"></span><button class="btn" id="apkGo">Posodobi</button></div>
   <div class="gps" id="gps" hidden><i></i><span></span></div>
 
   <div class="empty" id="emptyState" hidden>
@@ -256,8 +257,10 @@ dialog::backdrop{background:rgba(10,14,11,.5)}
     <p class="muted" id="updStatus" aria-live="polite"></p>
   </section>
   <section id="apkSec" hidden>
-    <p class="muted">Nov APK je potreben le, ko se spremeni Android del aplikacije.</p>
-    <div class="row"><a class="btn" href="https://github.com/mzkuncsluzba-netizen/PlaninaAPP/releases/latest">Stran z APK</a></div>
+    <p class="muted">Nov APK je potreben, ko se spremeni Android del aplikacije (npr. povezava z uro).</p>
+    <div class="row"><button class="btn" id="apkInstall" hidden>Posodobi aplikacijo</button>
+      <a class="btn" href="https://github.com/mzkuncsluzba-netizen/PlaninaAPP/releases/latest">Stran z APK</a></div>
+    <p class="muted" id="apkStatus" aria-live="polite"></p>
   </section>
   <p class="muted">Odprta koda pod GPLv3. Povezava z uro temelji na projektih Sommet in openambit.</p>
 </div></dialog>
@@ -794,9 +797,31 @@ window.planinaUpdateResult=(result,ver,manual)=>{
   }
 };
 $('#openMenu').onclick=()=>{fillMenu();$('#updStatus').textContent='';show($('#dlgMenu'))};
-$('#checkUpd').onclick=()=>{$('#updStatus').textContent='Preverjam …';try{AND.checkUpdate(true)}catch(e){$('#updStatus').textContent='Posodobitev ni na voljo.'}};
+$('#checkUpd').onclick=()=>{$('#updStatus').textContent='Preverjam …';try{AND.checkUpdate(true)}catch(e){$('#updStatus').textContent='Posodobitev ni na voljo.'}
+  if(AND&&AND.checkApk){$('#apkStatus').textContent='Preverjam novo verzijo za Android …';try{AND.checkApk(true)}catch(e){}}};
 $('#updApply').onclick=reloadApp;
 if(AND&&AND.checkUpdate) setTimeout(()=>{try{AND.checkUpdate(false)}catch(e){}},2500);
+
+/* new APK from the GitHub release, downloaded and installed by the app itself */
+function apkInstall(){$('#apkNotice').hidden=true;$('#apkStatus').textContent='Začenjam prenos …';toast('Prenašam novo verzijo …');try{AND.installApk()}catch(e){}}
+$('#apkGo').onclick=apkInstall;$('#apkInstall').onclick=apkInstall;
+window.planinaApk=(type,data)=>{
+  const st=$('#apkStatus');
+  if(type==='available'){
+    $('#apkTxt').textContent=`Na voljo je nova verzija aplikacije (${data}).`;$('#apkNotice').hidden=false;
+    $('#apkInstall').hidden=false;$('#apkInstall').textContent=`Posodobi na verzijo ${data}`;st.textContent='';
+  }
+  else if(type==='current'){st.textContent=`Android del je najnovejši (verzija ${data}).`;$('#apkInstall').hidden=true}
+  else if(type==='offline'){st.textContent='Ni povezave z GitHubom.'}
+  else if(type==='permission'){st.textContent='Dovoli »Nameščanje neznanih aplikacij« za PlaninaAPP in se vrni nazaj.';toast(st.textContent)}
+  else if(type==='downloading'){st.textContent=data?`Prenašam novo verzijo: ${data} %`:'Prenašam novo verzijo …'}
+  else if(type==='installing'){st.textContent='Nameščam …'}
+  else if(type==='confirm'){st.textContent='Potrdi namestitev v oknu Androida.'}
+  else if(type==='done'){st.textContent='Posodobljeno.'}
+  else if(type==='cancelled'){st.textContent='Namestitev je preklicana.'}
+  else if(type==='error'){st.textContent=data;toast(data)}
+};
+if(AND&&AND.checkApk) setTimeout(()=>{try{AND.checkApk(false)}catch(e){}},3500);
 
 /* ---------- Suunto Ambit over Bluetooth (Android) ---------- */
 let watchNew=[],watchBusy=false;

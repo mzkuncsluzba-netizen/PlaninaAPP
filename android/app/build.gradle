@@ -19,6 +19,24 @@ android {
         }
     }
 
+    // One fixed key for every build, so a new APK installs over the old one (and the app can
+    // update itself). Without it each GitHub build made its own debug key and Android refused
+    // the update. The key is in the repo on purpose: the app only ever installs updates it
+    // downloads from this repository's own releases.
+    signingConfigs {
+        planina {
+            storeFile file('planina.keystore')
+            storeType 'pkcs12'
+            storePassword 'planinaapp'
+            keyAlias 'planina'
+            keyPassword 'planinaapp'
+        }
+    }
+    buildTypes {
+        debug { signingConfig signingConfigs.planina }
+        release { signingConfig signingConfigs.planina }
+    }
+
     externalNativeBuild {
         cmake {
             path 'src/main/cpp/CMakeLists.txt'

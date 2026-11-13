@@ -33,8 +33,13 @@ jobs:
           PLANINA_KEYSTORE: ${{ secrets.PLANINA_KEYSTORE }}
         run: |
           if [ -n "$PLANINA_KEYSTORE" ]; then
-            echo "$PLANINA_KEYSTORE" | base64 -d > android/app/planina.keystore
-            echo "Fixed signing key in use."
+            clean=$(printf '%s' "$PLANINA_KEYSTORE" | tr -d ' \t\r\n')
+            echo "Secret length: ${#clean} characters (expected about 3156)."
+            if ! printf '%s' "$clean" | base64 -d > android/app/planina.keystore; then
+              echo "::error::PLANINA_KEYSTORE is not valid base64 - paste the key again."
+              exit 1
+            fi
+            echo "Fixed signing key in use ($(stat -c %s android/app/planina.keystore) bytes)."
           else
             echo "::warning::PLANINA_KEYSTORE secret is missing - APK is signed with a throwaway key and will not install over the previous one."
           fi
